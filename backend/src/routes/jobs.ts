@@ -1,54 +1,57 @@
-// src/controllers/jobsController.ts
-import type { Request, Response } from 'express';
+// backend/src/routes/jobs.ts
+import express from 'express';
+import { authenticateToken } from '../middleware/auth.js';
+import joobleService from '../services/joobleService.js';
 import jobRecommendationService from '../services/jobRecommendationService.js';
 import { ResumeModel } from '../models/Resume.js';
 
+const router = express.Router();
 const resumeModel = new ResumeModel();
 
 /**
- * Scrape and store jobs
+ * POST /api/jobs/search
+ * Search jobs from Jooble API
  */
-export const scrapeJobs = async (req: Request, res: Response) => {
+router.post('/jobs/search', authenticateToken, async (req, res) => {
   try {
-    const { searchQuery = 'software', location = '' } = req.body;
+    const { keywords = 'software developer', location = '', page = '1' } = req.body;
 
-    console.log(`Scraping jobs: query="${searchQuery}", location="${location}"`);
+    console.log(`Searching jobs: keywords="${keywords}", location="${location}"`);
 
-    const jobs = await jobRecommendationService.scrapeJobs(searchQuery, location);
-
-    if (jobs.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'No jobs found'
-      });
-    }
-
-    // Store jobs in database
-    await jobRecommendationService.storeJobs(jobs);
+    const result = await joobleService.searchJobs({
+      keywords,
+      location,
+      page
+    });
 
     res.status(200).json({
       success: true,
-      message: `Successfully scraped and stored ${jobs.length} jobs`,
-      count: jobs.length
+      totalCount: result.totalCount,
+      jobsCount: result.jobs.length,
+      jobs: result.jobs,
+      apiCallsUsed: joobleService['apiCallCount'],
+      apiCallsRemaining: 500 - joobleService['apiCallCount']
     });
   } catch (error: any) {
-    console.error('Error scraping jobs:', error);
+    console.error('Error searching jobs:', error);
     res.status(500).json({
       success: false,
-      message: 'Error scraping jobs: ' + (error.message || 'Unknown error')
+      message: 'Error searching jobs: ' + (error.message || 'Unknown error')
     });
   }
-};
+});
 
 /**
- * Get all jobs with optional filters
+ * GET /api/jobs
+ * Get all jobs from database with optional filters
  */
-export const getJobs = async (req: Request, res: Response) => {
+router.get('/jobs', authenticateToken, async (req, res) => {
   try {
-    const { location, days_posted } = req.query;
+    const { location, keywords, days_posted } = req.query;
 
     const filters: any = {};
     if (location) filters.location = location as string;
+    if (keywords) filters.keywords = keywords as string;
     if (days_posted) filters.days_posted = parseInt(days_posted as string);
 
     const jobs = await jobRecommendationService.getJobs(filters);
@@ -65,12 +68,36 @@ export const getJobs = async (req: Request, res: Response) => {
       message: 'Error fetching jobs: ' + (error.message || 'Unknown error')
     });
   }
-};
+});
 
 /**
- * Get job recommendations based on user's resume
+ * POST /api/jobs/refresh
+ * Manually refresh jobs from Jooble API
  */
-export const getRecommendations = async (req: Request, res: Response) => {
+router.post('/jobs/refresh', authenticateToken, async (req, res) => {
+  try {
+    const { keywords = 'software developer', location = '' } = req.body;
+
+    await joobleService.refreshJobs(keywords, location);
+
+    res.status(200).json({
+      success: true,
+      message: `Successfully refreshed jobs for "${keywords}" in "${location}"`
+    });
+  } catch (error: any) {
+    console.error('Error refreshing jobs:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error refreshing jobs: ' + (error.message || 'Unknown error')
+    });
+  }
+});
+
+/**
+ * GET /api/jobs/recommendations
+ * Get job recommendations based on user's resume analysis
+ */
+router.get('/jobs/recommendations', authenticateToken, async (req, res) => {
   try {
     const userId = req.user?.id;
 
@@ -81,7 +108,7 @@ export const getRecommendations = async (req: Request, res: Response) => {
       });
     }
 
-    const { location, days_posted, min_match_score } = req.query;
+    const { location, keywords, days_posted, min_match_score } = req.query;
 
     // Get user's latest resume
     const resume = await resumeModel.getLatestResume(userId);
@@ -97,20 +124,21 @@ export const getRecommendations = async (req: Request, res: Response) => {
     if (!resume.analysis_data) {
       return res.status(400).json({
         success: false,
-        message: 'Resume has not been analyzed yet. Please analyze your resume first.'
+        message: 'Resume has not been analyzed yet. Please analyze your resume first at /api/analyze'
       });
     }
 
     // Prepare filters
     const filters: any = {};
     if (location) filters.location = location as string;
+    if (keywords) filters.keywords = keywords as string;
     if (days_posted) filters.days_posted = parseInt(days_posted as string);
     if (min_match_score) filters.min_match_score = parseFloat(min_match_score as string);
 
     console.log(`Generating recommendations for user ${userId} with filters:`, filters);
 
-    // Generate recommendations
-    const recommendations = await jobRecommendationService.generateRecommendations(
+    // Get recommendations from Jooble
+    const recommendations = await joobleService.getRecommendedJobs(
       userId,
       resume.analysis_data,
       filters
@@ -134,7 +162,12 @@ export const getRecommendations = async (req: Request, res: Response) => {
 
     res.status(200).json({
       success: true,
-      ...recommendations
+      atsScore: recommendations.atsScore,
+      totalJobs: recommendations.totalJobs,
+      recommendedJobs: recommendations.recommendedJobs,
+      recommendations: recommendations.recommendations,
+      apiCallsUsed: recommendations.apiCallsUsed,
+      apiCallsRemaining: recommendations.apiCallsRemaining
     });
   } catch (error: any) {
     console.error('Error getting recommendations:', error);
@@ -143,12 +176,13 @@ export const getRecommendations = async (req: Request, res: Response) => {
       message: 'Error generating recommendations: ' + (error.message || 'Unknown error')
     });
   }
-};
+});
 
 /**
- * Get stored recommendations for user
+ * GET /api/jobs/recommendations/stored
+ * Get stored recommendations for user from database
  */
-export const getStoredRecommendations = async (req: Request, res: Response) => {
+router.get('/jobs/recommendations/stored', authenticateToken, async (req, res) => {
   try {
     const userId = req.user?.id;
 
@@ -178,4 +212,6 @@ export const getStoredRecommendations = async (req: Request, res: Response) => {
       message: 'Error fetching recommendations: ' + (error.message || 'Unknown error')
     });
   }
-};
+});
+
+export default router;
