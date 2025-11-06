@@ -4,6 +4,7 @@ import pool from '../config/database.js';
 
 const JOOBLE_API_URL = 'https://jooble.org/api/';
 const JOOBLE_API_KEY = 'b5c200c7-8bb9-4908-be33-9ac162971afe';
+const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://localhost:5000';
 
 interface JoobleSearchParams {
   keywords: string;
@@ -132,7 +133,6 @@ export class JoobleService {
           );
         }
       }
-
       await client.query('COMMIT');
       console.log(`Stored ${jobs.length} jobs in database`);
     } catch (error) {
@@ -232,8 +232,8 @@ export class JoobleService {
       // Combine and deduplicate jobs
       const allJobs = this.deduplicateJobs([...joobleJobs.jobs, ...dbJobs.jobs]);
 
-      // Apply ATS-based matching
-      const recommendedJobs = this.calculateJobMatches(allJobs, resumeAnalysis, filters);
+      // Apply ATS-based matching (now async with ML support)
+      const recommendedJobs = await this.calculateJobMatches(allJobs, resumeAnalysis, filters);
 
       return {
         success: true,
@@ -287,13 +287,25 @@ export class JoobleService {
   }
 
   /**
-   * Calculate job match scores based on ATS analysis
+   * Calculate job match scores based on ATS analysis (with ML support)
    */
-  private calculateJobMatches(
+  private async calculateJobMatches(
     jobs: JoobleJob[],
     analysis: any,
     filters: any
-  ): any[] {
+  ): Promise<any[]> {
+    // Try ML-based matching first
+    try {
+      const mlMatches = await this.calculateMLMatches(jobs, analysis);
+      if (mlMatches && mlMatches.length > 0) {
+        console.log('Using ML-based job matching');
+        return this.filterAndSortMatches(mlMatches, filters);
+      }
+    } catch (error) {
+      console.log('ML matching unavailable, falling back to rule-based');
+    }
+
+    // Fallback to rule-based matching
     const matchedJobs = jobs.map(job => {
       const matchScore = this.calculateMatchScore(job, analysis);
       
@@ -304,10 +316,67 @@ export class JoobleService {
       };
     });
 
+    return this.filterAndSortMatches(matchedJobs, filters);
+  }
+
+  /**
+   * Calculate matches using ML (Sentence-BERT)
+   */
+  private async calculateMLMatches(jobs: JoobleJob[], analysis: any): Promise<any[]> {
+    try {
+      // Prepare jobs for batch processing
+      const jobsData = jobs.map(job => ({
+        title: job.title,
+        description: job.snippet
+      }));
+
+      // Call ML service for batch matching
+      const response = await axios.post(
+        `${PYTHON_SERVICE_URL}/api/ml/batch-match-jobs`,
+        {
+          resumeText: analysis.extractedText || '',
+          jobs: jobsData,
+          atsScore: analysis.score || 0,
+          experienceLevel: analysis.extractedInfo?.experienceLevel || 'entry',
+          yearsOfExperience: analysis.extractedInfo?.yearsOfExperience || 0
+        },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 30000
+        }
+      );
+
+      if (response.data.success && response.data.matches) {
+        // Combine ML results with job data
+        return jobs.map((job, index) => {
+          const mlResult = response.data.matches[index];
+          return {
+            ...job,
+            matchScore: mlResult.matchScore || 0,
+            semanticSimilarity: mlResult.semanticSimilarity,
+            matchLevel: mlResult.matchLevel,
+            recommendationReasons: mlResult.reasons || [],
+            methodology: mlResult.methodology
+          };
+        });
+      }
+
+      return [];
+    } catch (error: any) {
+      console.error('ML matching error:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Filter and sort matches
+   */
+  private filterAndSortMatches(matches: any[], filters: any): any[] {
+    let filtered = matches;
+
     // Filter by minimum match score if specified
-    let filtered = matchedJobs;
     if (filters.min_match_score) {
-      filtered = matchedJobs.filter(job => job.matchScore >= filters.min_match_score);
+      filtered = matches.filter(job => job.matchScore >= filters.min_match_score);
     }
 
     // Filter by posting date if specified

@@ -96,18 +96,34 @@ export class AnalysisService {
 
       console.log(`Analyzing resume text (${text.length} characters)`);
 
-      // Call Python service
-      const response = await axios.post(
-        `${this.pythonServiceUrl}/api/analyze-text`,
-        { text },
-        {
-          headers: { 'Content-Type': 'application/json' },
-          timeout: 30000
-        }
-      );
+      // Try ML endpoint first, fall back to rule-based
+      try {
+        const mlResponse = await axios.post(
+          `${this.pythonServiceUrl}/api/ml/analyze-text`,
+          { text },
+          {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 30000
+          }
+        );
 
-      console.log(`Analysis complete - Score: ${response.data.score}`);
-      return response.data;
+        console.log(`ML Analysis complete - Score: ${mlResponse.data.score}`);
+        return mlResponse.data;
+      } catch (mlError: any) {
+        // If ML fails (e.g., libraries not installed), use rule-based
+        console.log('ML analysis unavailable, using rule-based analysis');
+        const response = await axios.post(
+          `${this.pythonServiceUrl}/api/analyze-text`,
+          { text },
+          {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 30000
+          }
+        );
+
+        console.log(`Analysis complete - Score: ${response.data.score}`);
+        return response.data;
+      }
     } catch (error: any) {
       if (error.code === 'ECONNREFUSED') {
         return {
@@ -135,18 +151,34 @@ export class AnalysisService {
         throw new Error(`PDF file not found at path: ${pdfPath}`);
       }
 
-      // Call Python service for complete analysis
-      const response = await axios.post(
-        `${this.pythonServiceUrl}/api/analyze-pdf`,
-        { filePath: pdfPath },
-        {
-          headers: { 'Content-Type': 'application/json' },
-          timeout: 60000 // 60 second timeout for complete pipeline
-        }
-      );
+      // Try ML endpoint first, fall back to rule-based
+      try {
+        const mlResponse = await axios.post(
+          `${this.pythonServiceUrl}/api/ml/analyze-pdf`,
+          { filePath: pdfPath },
+          {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 60000 // 60 second timeout for complete pipeline
+          }
+        );
 
-      console.log(`Analysis complete, score: ${response.data.score}`);
-      return response.data;
+        console.log(`ML Analysis complete, score: ${mlResponse.data.score}`);
+        return mlResponse.data;
+      } catch (mlError: any) {
+        // If ML fails, use rule-based
+        console.log('ML analysis unavailable, using rule-based analysis');
+        const response = await axios.post(
+          `${this.pythonServiceUrl}/api/analyze-pdf`,
+          { filePath: pdfPath },
+          {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 60000
+          }
+        );
+
+        console.log(`Analysis complete, score: ${response.data.score}`);
+        return response.data;
+      }
     } catch (error: any) {
       if (error.code === 'ECONNREFUSED') {
         return {
