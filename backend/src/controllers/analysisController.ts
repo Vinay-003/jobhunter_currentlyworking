@@ -11,6 +11,7 @@ export const analyzeResumeById = async (req: Request, res: Response) => {
   try {
     const resumeId = parseInt(req.params.id);
     const userId = req.user?.id;
+    const targetLevel = req.body?.targetLevel; // Get from request body
 
     if (isNaN(resumeId)) {
       return res.status(400).json({
@@ -54,9 +55,12 @@ export const analyzeResumeById = async (req: Request, res: Response) => {
     }
 
     console.log(`Analyzing resume ID ${resumeId} for user ${userId}`);
+    if (targetLevel) {
+      console.log(`Target experience level: ${targetLevel}`);
+    }
 
-    // Perform analysis
-    const analysisResult = await analysisService.analyzeResume(resume.file_path);
+    // Perform analysis with target level
+    const analysisResult = await analysisService.analyzeResume(resume.file_path, targetLevel);
 
     if (!analysisResult.success) {
       return res.status(500).json({
@@ -65,11 +69,16 @@ export const analyzeResumeById = async (req: Request, res: Response) => {
       });
     }
 
+    // Add target level to analysis result if provided
+    const analysisWithLevel = targetLevel 
+      ? { ...analysisResult, targetLevel } 
+      : analysisResult;
+
     // Update resume with analysis results
     const updatedResume = await resumeModel.updateResumeStatus(
       resumeId,
       'processed',
-      analysisResult
+      analysisWithLevel
     );
 
     res.status(200).json({
@@ -98,6 +107,7 @@ export const analyzeResumeById = async (req: Request, res: Response) => {
 export const analyzeLatestResume = async (req: Request, res: Response) => {
   try {
     const userId = req.user?.id;
+    const targetLevel = req.body?.targetLevel; // Get from request body
 
     if (!userId) {
       return res.status(401).json({
@@ -116,8 +126,8 @@ export const analyzeLatestResume = async (req: Request, res: Response) => {
       });
     }
 
-    // Check if already analyzed
-    if (resume.status === 'processed' && resume.analysis_data) {
+    // Check if already analyzed (skip this check if targetLevel is provided - re-analyze with new level)
+    if (!targetLevel && resume.status === 'processed' && resume.analysis_data) {
       return res.status(200).json({
         success: true,
         message: 'Resume already analyzed',
@@ -139,10 +149,14 @@ export const analyzeLatestResume = async (req: Request, res: Response) => {
       });
     }
 
+    if (targetLevel) {
+      console.log(`Analyzing with target experience level: ${targetLevel}`);
+    }
+    
     console.log(`Analyzing latest resume for user ${userId}`);
 
-    // Perform analysis
-    const analysisResult = await analysisService.analyzeResume(resume.file_path);
+    // Perform analysis with target level
+    const analysisResult = await analysisService.analyzeResume(resume.file_path, targetLevel);
 
     if (!analysisResult.success) {
       return res.status(500).json({
@@ -151,11 +165,16 @@ export const analyzeLatestResume = async (req: Request, res: Response) => {
       });
     }
 
+    // Add target level to analysis result if provided
+    const analysisWithLevel = targetLevel 
+      ? { ...analysisResult, targetLevel } 
+      : analysisResult;
+
     // Update resume with analysis results
     const updatedResume = await resumeModel.updateResumeStatus(
       resume.id,
       'processed',
-      analysisResult
+      analysisWithLevel
     );
 
     res.status(200).json({

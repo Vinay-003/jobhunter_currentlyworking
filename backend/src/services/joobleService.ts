@@ -216,25 +216,23 @@ export class JoobleService {
       // Extract keywords from resume skills
       const keywords = this.extractKeywordsFromResume(resumeAnalysis);
       
-      // Validate that we have meaningful skills extracted
-      // If no skills were extracted, it's likely not a resume
-      if (!keywords || keywords === 'software developer') {
-        const skillCount = resumeAnalysis?.extractedInfo?.skills?.length || 0;
-        if (skillCount < 3) {
-          console.error('❌ Invalid resume: insufficient skills extracted');
-          console.error(`   Skills found: ${skillCount}`);
-          console.error(`   This appears to be a non-resume file (e.g., lab report, essay, etc.)`);
-          return {
-            success: false,
-            error: 'Invalid resume file. Please upload a valid resume with your skills and experience. Only ' + skillCount + ' skill(s) detected.',
-            totalJobs: 0,
-            recommendedJobs: 0,
-            recommendations: [],
-            atsScore: resumeAnalysis.score || 0,
-            apiCallsUsed: this.apiCallCount,
-            apiCallsRemaining: this.API_LIMIT - this.apiCallCount
-          };
-        }
+      // COMPREHENSIVE VALIDATION: Check both skills AND format
+      const validationResult = this.validateResumeFormat(resumeAnalysis);
+      
+      if (!validationResult.isValid) {
+        console.error('❌ Invalid resume file detected');
+        console.error(`   Reason: ${validationResult.reason}`);
+        console.error(`   Details:`, validationResult.details);
+        return {
+          success: false,
+          error: validationResult.reason,
+          totalJobs: 0,
+          recommendedJobs: 0,
+          recommendations: [],
+          atsScore: resumeAnalysis.score || 0,
+          apiCallsUsed: this.apiCallCount,
+          apiCallsRemaining: this.API_LIMIT - this.apiCallCount
+        };
       }
       
       // Search jobs from Jooble
@@ -272,6 +270,87 @@ export class JoobleService {
         error: error.message
       };
     }
+  }
+
+  /**
+   * Validate resume format and structure
+   * Checks for proper resume characteristics vs random documents
+   */
+  private validateResumeFormat(analysis: any): { isValid: boolean; reason: string; details: any } {
+    const details: any = {
+      skillCount: 0,
+      hasSections: false,
+      sectionCount: 0,
+      hasContact: false,
+      hasWorkExperience: false,
+      hasEducation: false,
+      wordCount: 0,
+      bulletCount: 0
+    };
+
+    // Check 1: Must have extractedInfo (basic requirement)
+    if (!analysis.extractedInfo) {
+      return {
+        isValid: false,
+        reason: 'Invalid file format. This does not appear to be a resume.',
+        details
+      };
+    }
+
+    const info = analysis.extractedInfo;
+
+    // Gather metrics
+    details.skillCount = info.skills?.length || 0;
+    details.sectionCount = info.sections?.length || 0;
+    details.hasSections = details.sectionCount > 0;
+    details.hasContact = info.has_contact || !!(info.email || info.phone);
+    details.hasWorkExperience = (info.work_experience?.length || 0) > 0;
+    details.hasEducation = (info.education?.length || 0) > 0;
+    details.wordCount = info.word_count || 0;
+    details.bulletCount = info.total_bullets || 0;
+
+    // VALIDATION RULES (must pass at least 3 out of 5 checks)
+    const checks = {
+      sufficientSkills: details.skillCount >= 3,
+      hasProperSections: details.sectionCount >= 2, // At least 2 sections (e.g., Experience + Education)
+      hasContactInfo: details.hasContact,
+      hasExperienceOrEducation: details.hasWorkExperience || details.hasEducation,
+      reasonableLength: details.wordCount >= 200 && details.wordCount <= 2000 // Resume range
+    };
+
+    const passedChecks = Object.values(checks).filter(Boolean).length;
+    const totalChecks = Object.keys(checks).length;
+
+    console.log('📋 RESUME FORMAT VALIDATION:', {
+      checks,
+      passedChecks,
+      totalChecks,
+      details
+    });
+
+    // Must pass at least 3 out of 5 checks
+    if (passedChecks < 3) {
+      const failedChecks = Object.entries(checks)
+        .filter(([_, passed]) => !passed)
+        .map(([check]) => check);
+
+      return {
+        isValid: false,
+        reason: `Invalid resume file. This appears to be a non-resume document (failed ${totalChecks - passedChecks}/${totalChecks} format checks). Please upload a valid resume with your professional information.`,
+        details: {
+          ...details,
+          failedChecks,
+          passedChecks: `${passedChecks}/${totalChecks}`
+        }
+      };
+    }
+
+    // All checks passed
+    return {
+      isValid: true,
+      reason: 'Valid resume format',
+      details
+    };
   }
 
   /**
@@ -315,10 +394,27 @@ export class JoobleService {
       databases: ['mysql', 'postgresql', 'mongodb', 'supabase', 'redis', 'cassandra', 'dynamodb', 'sql'],
       cloudTools: ['aws', 'azure', 'gcp', 'docker', 'kubernetes', 'ci/cd', 'github actions', 'git', 'github', 'version control'],
       dataScience: ['machine learning', 'ai', 'data science', 'pandas', 'numpy', 'plotly', 'tensorflow', 'pytorch', 'scikit-learn'],
-      highValue: ['full stack', 'devops', 'microservices', 'api', 'rest', 'graphql']
+      highValue: ['full stack', 'devops', 'microservices', 'api', 'rest', 'graphql'],
+      // Soft skills - important for all roles (management, HR, marketing, etc.)
+      softSkills: ['leadership', 'communication', 'teamwork', 'problem solving', 'analytical', 
+                   'collaboration', 'project management', 'critical thinking', 'mentoring',
+                   'presentation', 'negotiation', 'time management', 'event management',
+                   'team management', 'versatile', 'trust building', 'strategic planning'],
+      // Non-CS domain skills
+      business: ['marketing', 'sales', 'business development', 'strategy', 'consulting', 
+                'finance', 'accounting', 'economics', 'operations', 'supply chain'],
+      design: ['ui/ux', 'graphic design', 'product design', 'figma', 'sketch', 'photoshop', 
+              'illustrator', 'wireframing', 'prototyping'],
+      management: ['agile', 'scrum', 'kanban', 'pmp', 'prince2', 'stakeholder management',
+                  'resource planning', 'budget management']
     };
     
     // Categorize each skill
+    const softSkills: string[] = [];
+    const businessSkills: string[] = [];
+    const designSkills: string[] = [];
+    const managementSkills: string[] = [];
+    
     uniqueKeywords.forEach(skill => {
       const skillLower = skill.toLowerCase();
       
@@ -340,19 +436,48 @@ export class JoobleService {
       if (skillCategories.highValue.some(h => skillLower.includes(h))) {
         prioritySkills.push(skill);
       }
+      if (skillCategories.softSkills.some(s => skillLower.includes(s))) {
+        softSkills.push(skill);
+      }
+      if (skillCategories.business.some(b => skillLower.includes(b))) {
+        businessSkills.push(skill);
+      }
+      if (skillCategories.design.some(d => skillLower.includes(d))) {
+        designSkills.push(skill);
+      }
+      if (skillCategories.management.some(m => skillLower.includes(m))) {
+        managementSkills.push(skill);
+      }
     });
     
-    // Build optimized search query with ALL relevant technical skills
-    // Strategy: Use frameworks + languages + databases + cloud tools + data science (exclude soft skills)
+    // Build optimized search query with ALL relevant skills
+    // Strategy: Include technical skills + domain-specific skills + key soft skills
     const selectedSkills: string[] = [];
     
-    // Add ALL categorized technical skills (they're already filtered to be job-relevant)
-    selectedSkills.push(...prioritySkills);  // Full stack, DevOps, etc.
-    selectedSkills.push(...frameworks);      // React, Next.js, Express, etc.
-    selectedSkills.push(...languages);       // Python, JavaScript, Rust, etc.
-    selectedSkills.push(...cloudTools);      // Azure, CI/CD, GitHub Actions, etc.
-    selectedSkills.push(...databases);       // PostgreSQL, MySQL, Supabase, etc.
-    selectedSkills.push(...dataScience);     // ML, AI, Pandas, NumPy, etc.
+    // Add ALL categorized skills (prioritize hard skills but include domain-specific ones)
+    selectedSkills.push(...prioritySkills);    // Full stack, DevOps, etc.
+    selectedSkills.push(...frameworks);        // React, Next.js, Express, etc.
+    selectedSkills.push(...languages);         // Python, JavaScript, Rust, etc.
+    selectedSkills.push(...cloudTools);        // Azure, CI/CD, GitHub Actions, etc.
+    selectedSkills.push(...databases);         // PostgreSQL, MySQL, Supabase, etc.
+    selectedSkills.push(...dataScience);       // ML, AI, Pandas, NumPy, etc.
+    selectedSkills.push(...businessSkills);    // Marketing, Sales, Finance, etc.
+    selectedSkills.push(...designSkills);      // UI/UX, Figma, Graphic Design, etc.
+    selectedSkills.push(...managementSkills);  // Agile, Scrum, Project Management, etc.
+    
+    // Add top soft skills (limit to avoid dilution, but include important ones)
+    const topSoftSkills = softSkills.slice(0, 5);  // Include up to 5 soft skills
+    selectedSkills.push(...topSoftSkills);
+    
+    // Add any uncategorized skills that might be domain-specific (e.g., "testing", "quality assurance")
+    const categorizedSet = new Set([
+      ...frameworks, ...languages, ...databases, ...cloudTools, ...dataScience,
+      ...prioritySkills, ...softSkills, ...businessSkills, ...designSkills, ...managementSkills
+    ]);
+    const uncategorizedSkills = uniqueKeywords.filter(skill => !categorizedSet.has(skill));
+    
+    // Add uncategorized skills (could be domain-specific like "legal", "healthcare", etc.)
+    selectedSkills.push(...uncategorizedSkills);
     
     // Remove duplicates
     const finalKeywords = [...new Set(selectedSkills)];
@@ -364,7 +489,13 @@ export class JoobleService {
       databases: databases.length,
       cloudTools: cloudTools.length,
       dataScience: dataScience.length,
-      highValue: prioritySkills.length
+      highValue: prioritySkills.length,
+      softSkills: softSkills.length,
+      business: businessSkills.length,
+      design: designSkills.length,
+      management: managementSkills.length,
+      uncategorized: uncategorizedSkills.length,
+      selected: finalKeywords.length
     });
     console.log(`🔍 Selected keywords (${finalKeywords.length}):`, finalKeywords);
     

@@ -161,8 +161,11 @@ router.get('/jobs/recommendations', authenticateToken, async (req, res) => {
       console.log(`   - Limited skills: ${hasLimitedSkills} (${resume.analysis_data.extractedInfo?.skills?.length || 0} skills found)`);
       console.log(`   - Missing new fields: ${missingNewFields}`);
       
+      // Get target level from stored analysis data or default to entry
+      const targetLevel = resume.analysis_data?.targetLevel || 'entry';
+      
       const analysisService = (await import('../services/analysisService.js')).default;
-      const freshAnalysis = await analysisService.analyzeResume(resume.file_path);
+      const freshAnalysis = await analysisService.analyzeResume(resume.file_path, targetLevel);
       
       if (freshAnalysis.success) {
         // Update the database with fresh analysis
@@ -185,7 +188,7 @@ router.get('/jobs/recommendations', authenticateToken, async (req, res) => {
 
     console.log(`Generating recommendations for user ${userId} with filters:`, filters);
     console.log(`Resume analysis structure:`, {
-      hasSkills: !!resume.analysis_data.skills,
+      hasSkills: !!(resume.analysis_data.skills || resume.analysis_data.extractedInfo?.skills),
       hasExtractedInfo: !!resume.analysis_data.extractedInfo,
       extractedInfoSkills: resume.analysis_data.extractedInfo?.skills || 'none',  // Show ALL skills, not just first 3
       extractedInfoSkillsCount: resume.analysis_data.extractedInfo?.skills?.length || 0,

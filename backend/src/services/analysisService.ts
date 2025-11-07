@@ -142,9 +142,12 @@ export class AnalysisService {
   /**
    * Complete analysis pipeline: extract text and analyze
    */
-  async analyzeResume(pdfPath: string): Promise<AnalysisResult> {
+  async analyzeResume(pdfPath: string, targetLevel?: string): Promise<AnalysisResult> {
     try {
       console.log(`Starting analysis for PDF: ${pdfPath}`);
+      if (targetLevel) {
+        console.log(`Target experience level: ${targetLevel}`);
+      }
 
       // Verify file exists
       if (!fs.existsSync(pdfPath)) {
@@ -155,7 +158,10 @@ export class AnalysisService {
       try {
         const mlResponse = await axios.post(
           `${this.pythonServiceUrl}/api/ml/analyze-pdf`,
-          { filePath: pdfPath },
+          { 
+            filePath: pdfPath,
+            targetLevel: targetLevel  // Pass target level to Python
+          },
           {
             headers: { 'Content-Type': 'application/json' },
             timeout: 60000 // 60 second timeout for complete pipeline
@@ -169,7 +175,10 @@ export class AnalysisService {
         console.log('ML analysis unavailable, using rule-based analysis');
         const response = await axios.post(
           `${this.pythonServiceUrl}/api/analyze-pdf`,
-          { filePath: pdfPath },
+          { 
+            filePath: pdfPath,
+            targetLevel: targetLevel
+          },
           {
             headers: { 'Content-Type': 'application/json' },
             timeout: 60000

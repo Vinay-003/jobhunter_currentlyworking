@@ -72,6 +72,7 @@ router.post('/upload-resume', authenticateToken, (req: express.Request, res: exp
     console.log('Upload request received');
     console.log('File:', req.file ? req.file.originalname : 'No file');
     console.log('User:', req.user?.id);
+    console.log('Target Level:', req.body?.targetLevel);
 
     if (!req.file) {
       return res.status(400).json({ 
@@ -93,6 +94,9 @@ router.post('/upload-resume', authenticateToken, (req: express.Request, res: exp
       });
     }
 
+    // Get target level from request body (optional)
+    const targetLevel = req.body?.targetLevel; // 'entry', 'mid', 'senior'
+
     console.log('Storing resume in database...');
     // Store resume information in database
     const resume = await resumeModel.createResume(
@@ -100,6 +104,11 @@ router.post('/upload-resume', authenticateToken, (req: express.Request, res: exp
       req.file.originalname,
       req.file.path
     );
+
+    // Store target level in resume metadata (for later use during analysis)
+    if (targetLevel) {
+      await resumeModel.updateResumeStatus(resume.id, 'uploaded', { targetLevel });
+    }
 
     console.log('Resume stored successfully:', resume.id);
 
@@ -110,7 +119,8 @@ router.post('/upload-resume', authenticateToken, (req: express.Request, res: exp
         id: resume.id,
         fileName: resume.file_name,
         uploadDate: resume.upload_date,
-        status: resume.status
+        status: resume.status,
+        targetLevel: targetLevel
       }
     });
   } catch (error: any) {

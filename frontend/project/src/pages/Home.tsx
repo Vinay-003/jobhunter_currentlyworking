@@ -44,6 +44,7 @@ const ResumeUploadSection = ({ onAnalysisComplete }: { onAnalysisComplete: (anal
   const [uploadStatus, setUploadStatus] = useState('');
   const [error, setError] = useState('');
   const [latestResume, setLatestResume] = useState<any>(null);
+  const [targetLevel, setTargetLevel] = useState<string>('entry'); // New state for experience level
 
   useEffect(() => {
     fetchLatestResume();
@@ -54,7 +55,7 @@ const ResumeUploadSection = ({ onAnalysisComplete }: { onAnalysisComplete: (anal
       const token = localStorage.getItem('token');
       if (!token) return;
 
-      const response = await axios.get(`${API_URL}/latest-resume`, {
+      const response = await axios.get<{ success: boolean; resume?: any; message?: string }>(`${API_URL}/latest-resume`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
 
@@ -101,6 +102,7 @@ const ResumeUploadSection = ({ onAnalysisComplete }: { onAnalysisComplete: (anal
 
     const formData = new FormData();
     formData.append('resume', resumeFile);
+    formData.append('targetLevel', targetLevel); // Include target level
 
     try {
       // Upload resume
@@ -111,24 +113,27 @@ const ResumeUploadSection = ({ onAnalysisComplete }: { onAnalysisComplete: (anal
         }
       });
 
-      if (!uploadResponse.data.success) {
-        throw new Error(uploadResponse.data.message || 'Upload failed');
+      if (!(uploadResponse.data as any).success) {
+        throw new Error((uploadResponse.data as any).message || 'Upload failed');
       }
 
       setUploadStatus('Analyzing resume...');
 
-      // Analyze resume
-      const analyzeResponse = await axios.post(`${API_URL}/analyze`, {}, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      // Analyze resume with target level
+      const analyzeResponse = await axios.post(`${API_URL}/analyze`, 
+        { targetLevel }, // Pass target level to analysis
+        {
+          headers: { 'Authorization': `Bearer ${token}` }
+        }
+      );
 
-      if (!analyzeResponse.data.success) {
-        throw new Error(analyzeResponse.data.message || 'Analysis failed');
+      if (!(analyzeResponse.data as any).success) {
+        throw new Error((analyzeResponse.data as any).message || 'Analysis failed');
       }
 
       setUploadStatus('Resume analyzed successfully!');
-      setLatestResume(analyzeResponse.data.resume);
-      onAnalysisComplete(analyzeResponse.data.analysis);
+      setLatestResume((analyzeResponse.data as any).resume);
+      onAnalysisComplete((analyzeResponse.data as any).analysis);
       setError('');
       
       // Reset file input
@@ -171,6 +176,26 @@ const ResumeUploadSection = ({ onAnalysisComplete }: { onAnalysisComplete: (anal
           </p>
           <p className="text-gray-500 text-sm">Supported format: PDF</p>
         </label>
+
+        {/* Experience Level Selector */}
+        <div className="mt-6 max-w-md mx-auto">
+          <label className="block text-sm font-medium text-gray-300 mb-2">
+            What's your experience level?
+          </label>
+          <select
+            value={targetLevel}
+            onChange={(e) => setTargetLevel(e.target.value)}
+            disabled={isProcessing}
+            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent disabled:opacity-50"
+          >
+            <option value="entry">Entry Level (Student / Fresher / 0-2 years)</option>
+            <option value="mid">Mid Level (2-5 years experience)</option>
+            <option value="senior">Senior Level (5+ years experience)</option>
+          </select>
+          <p className="text-xs text-gray-500 mt-2">
+            We'll adjust scoring expectations based on your level
+          </p>
+        </div>
 
         {resumeFile && !isProcessing && (
           <div className="mt-6">
@@ -242,7 +267,11 @@ const JobRecommendations = ({ analysis }: { analysis: ResumeAnalysis | null }) =
       params.append('days_posted', filters.days_posted.toString());
       params.append('min_match_score', filters.min_match_score.toString());
 
-      const response = await axios.get(
+      const response = await axios.get<{
+        success: boolean;
+        recommendations?: Job[];
+        message?: string;
+      }>(
         `${API_URL}/jobs/recommendations?${params.toString()}`,
         { headers: { 'Authorization': `Bearer ${token}` } }
       );

@@ -75,12 +75,14 @@ class ResumeAnalyzerML:
         else:
             print("❌ ML libraries not available. Falling back to rule-based analysis.")
     
-    def analyze_resume(self, text: str) -> Dict[str, Any]:
+    def analyze_resume(self, text: str, target_level: str = None) -> Dict[str, Any]:
         """
         Analyze resume text using ML and rule-based approaches
         
         Args:
             text: Resume text content
+            target_level: Target experience level - 'entry', 'mid', 'senior' (optional)
+                         If not provided, auto-detected from resume
             
         Returns:
             Dictionary with ATS score, insights, and recommendations
@@ -94,15 +96,26 @@ class ResumeAnalyzerML:
         # Extract structured information
         extracted_info = self._extract_resume_info(text)
         
+        # Use target level if provided, otherwise use auto-detected level
+        experience_level = target_level if target_level else extracted_info.get("experience_level", "entry")
+        
+        # Validate and normalize experience level
+        valid_levels = ["entry", "mid", "senior"]
+        if experience_level not in valid_levels:
+            experience_level = "entry"  # Default to entry if invalid
+        
+        # Store the target level in extracted_info for scoring/recommendations
+        extracted_info["target_level"] = experience_level
+        
         # Calculate ATS score using ML if available, otherwise use rules
         if self.model is not None:
-            ats_score = self._calculate_ml_ats_score(text, extracted_info)
+            ats_score = self._calculate_ml_ats_score(text, extracted_info, experience_level)
         else:
-            ats_score = self._calculate_rule_based_score(text, extracted_info)
+            ats_score = self._calculate_rule_based_score(text, extracted_info, experience_level)
         
-        # Generate insights and recommendations
-        insights = self._generate_insights(extracted_info, ats_score)
-        recommendations = self._generate_recommendations(extracted_info, ats_score)
+        # Generate insights and recommendations based on target level
+        insights = self._generate_insights(extracted_info, ats_score, experience_level)
+        recommendations = self._generate_recommendations(extracted_info, ats_score, experience_level)
         
         # Determine status
         status, status_message = self._get_status(ats_score)
@@ -715,9 +728,10 @@ class ResumeAnalyzerML:
             # Default to entry if unclear
             return ('entry', max(years, 0))
     
-    def _calculate_ml_ats_score(self, text: str, info: Dict) -> float:
+    def _calculate_ml_ats_score(self, text: str, info: Dict, experience_level: str = "entry") -> float:
         """
         Calculate ATS score using ML semantic analysis
+        Adjusts expectations based on experience level (entry/mid/senior)
         
         Uses Sentence-BERT to compare resume against ideal resume characteristics
         """
@@ -747,129 +761,280 @@ class ResumeAnalyzerML:
         top_similarities = torch.topk(similarities, k=min(3, len(similarities))).values
         avg_top_similarity = torch.mean(top_similarities).item()
         
-        # Base ML score (0-20 points based on semantic similarity)
-        # Minimize ML impact to avoid inconsistency
-        ml_score = avg_top_similarity * 20
+        # STRICT SCORING - Align with ResumeWorded's harsh standards
+        # Base ML score (0-10 points) - Reduced significantly
+        ml_score = avg_top_similarity * 10
         
-        # Rule-based bonuses (0-80 points)
+        # Rule-based scoring (0-90 points) - Much stricter thresholds
         rule_score = 0
         
-        # Contact info (5 points)
+        # Contact info (3 points) - Basic requirement
         if info["has_contact"]:
-            rule_score += 5
-        elif info["email"] or info["phone"]:
             rule_score += 3
+        elif info["email"] or info["phone"]:
+            rule_score += 1.5
         
-        # Sections (10 points) - Reward comprehensive structure
-        if len(info["sections"]) >= 5:
-            rule_score += 10
-        elif len(info["sections"]) >= 4:
-            rule_score += 7
-        elif len(info["sections"]) >= 3:
+        # Professional identity (2 points)
+        if info.get("name"):
+            rule_score += 1
+        if info.get("linkedin") or info.get("github"):
+            rule_score += 1
+        
+        # Sections (5 points) - STRICT: Need all key sections
+        if len(info["sections"]) >= 6:
             rule_score += 5
-        else:
-            rule_score += (len(info["sections"]) / 3) * 5
+        elif len(info["sections"]) >= 5:
+            rule_score += 4
+        elif len(info["sections"]) >= 4:
+            rule_score += 3
+        elif len(info["sections"]) >= 3:
+            rule_score += 1.5
+        # Less than 3 sections = 0 points
         
-        # Action verbs (8 points) - Reward diversity
+        # Education (6 points) - STRICTER
+        education_count = len(info.get("education", []))
+        if experience_level == "entry":
+            if education_count >= 1:
+                edu = info.get("education", [{}])[0]
+                if edu.get("institution") and edu.get("degree") and edu.get("field"):
+                    rule_score += 6  # Complete info only
+                elif edu.get("institution") and edu.get("degree"):
+                    rule_score += 4  # Partial
+                else:
+                    rule_score += 2  # Minimal
+        elif experience_level == "mid":
+            if education_count >= 2:
+                rule_score += 6
+            elif education_count == 1:
+                edu = info.get("education", [{}])[0]
+                if edu.get("institution") and edu.get("degree"):
+                    rule_score += 5
+                else:
+                    rule_score += 2.5
+        else:  # senior
+            if education_count >= 2:
+                rule_score += 5
+            elif education_count >= 1:
+                rule_score += 4
+        
+        # Work Experience (15 points) - MOST IMPORTANT, VERY STRICT
+        work_exp_count = len(info.get("work_experience", []))
+        project_count = len(info.get("projects", []))
+        
+        if experience_level == "entry":
+            # Entry: Very strict - need solid experience or projects
+            if work_exp_count >= 3:
+                rule_score += 15  # Outstanding for entry
+            elif work_exp_count == 2:
+                rule_score += 12  # Excellent
+            elif work_exp_count == 1:
+                rule_score += 7  # Acceptable
+            elif project_count >= 4:
+                rule_score += 8  # Strong projects barely compensate
+            elif project_count >= 3:
+                rule_score += 5  # Some compensation
+            else:
+                rule_score += 1  # Insufficient
+        elif experience_level == "mid":
+            # Mid: Need proven track record
+            if work_exp_count >= 4:
+                rule_score += 15
+            elif work_exp_count == 3:
+                rule_score += 13
+            elif work_exp_count == 2:
+                rule_score += 8  # Below expectations
+            elif work_exp_count == 1:
+                rule_score += 3  # Major red flag
+            else:
+                rule_score += 0  # Unacceptable
+        else:  # senior
+            # Senior: Need extensive experience
+            if work_exp_count >= 5:
+                rule_score += 15
+            elif work_exp_count >= 4:
+                rule_score += 12
+            elif work_exp_count == 3:
+                rule_score += 7  # Minimum acceptable
+            elif work_exp_count == 2:
+                rule_score += 2  # Major concern
+            else:
+                rule_score += 0  # Unacceptable
+        
+        # Projects (8 points) - STRICTER requirements
+        if experience_level == "entry":
+            # Entry: Projects CRITICAL but need quality
+            if project_count >= 5:
+                rule_score += 8
+            elif project_count >= 4:
+                rule_score += 7
+            elif project_count >= 3:
+                rule_score += 5
+            elif project_count >= 2:
+                rule_score += 3
+            elif project_count == 1:
+                rule_score += 1
+        elif experience_level == "mid":
+            # Mid: Projects nice but not critical
+            if project_count >= 4:
+                rule_score += 8
+            elif project_count >= 3:
+                rule_score += 6
+            elif project_count >= 2:
+                rule_score += 4
+            elif project_count >= 1:
+                rule_score += 2
+        else:  # senior
+            # Senior: Projects optional
+            if project_count >= 3:
+                rule_score += 7
+            elif project_count >= 2:
+                rule_score += 5
+            elif project_count >= 1:
+                rule_score += 3
+        
+        # Action verbs (6 points) - MUCH STRICTER
         verb_count = len(info["action_verbs"])
-        if verb_count >= 15:
-            action_verb_score = 8
-        elif verb_count >= 10:
-            action_verb_score = 7
-        elif verb_count >= 6:
-            action_verb_score = 5
-        else:
-            action_verb_score = min(verb_count / 6 * 5, 5)
+        if verb_count >= 20:
+            rule_score += 6
+        elif verb_count >= 15:
+            rule_score += 5
+        elif verb_count >= 12:
+            rule_score += 4
+        elif verb_count >= 8:
+            rule_score += 2
+        elif verb_count >= 5:
+            rule_score += 1
+        # Less than 5 verbs = 0 points
         
-        # Penalty for repetitive verbs
-        repetitive_penalty = len(info.get("repetitive_verbs", {})) * 1
-        action_verb_score = max(0, action_verb_score - repetitive_penalty)
-        rule_score += action_verb_score
-        
-        # Skills (7 points) - Reward comprehensive skills
+        # Skills diversity (5 points) - STRICTER
         skill_count = len(info.get("skills", []))
-        if skill_count >= 25:
-            skill_score = 7
+        if skill_count >= 30:
+            rule_score += 5
+        elif skill_count >= 25:
+            rule_score += 4
         elif skill_count >= 20:
-            skill_score = 6
+            rule_score += 3
         elif skill_count >= 15:
-            skill_score = 5
+            rule_score += 2
         elif skill_count >= 10:
-            skill_score = 4
-        else:
-            skill_score = min(skill_count / 10 * 4, 4)
-        rule_score += skill_score
+            rule_score += 1
+        # Less than 10 skills = 0 points
         
-        # HEAVILY REDUCED: Quantification (5 points) - De-emphasize this
-        # Data shows TDS has 8.8% quantification but scores 87% on ResumeWorded
+        # Metrics/quantification (7 points) - CRITICAL for impact
         total_bullets = info.get("total_bullets", 0)
         quantified_bullets = info.get("quantified_bullets", 0)
         
         if total_bullets > 0:
             quantification_ratio = quantified_bullets / total_bullets
-            if quantification_ratio >= 0.5:
-                metric_score = 5
-            elif quantification_ratio >= 0.3:
-                metric_score = 4
-            elif quantification_ratio >= 0.15:
-                metric_score = 3
-            else:
-                metric_score = 2
+            if quantification_ratio >= 0.7:  # STRICTER: 70%+
+                rule_score += 7
+            elif quantification_ratio >= 0.6:  # 60%+
+                rule_score += 6
+            elif quantification_ratio >= 0.5:  # 50%+
+                rule_score += 5
+            elif quantification_ratio >= 0.4:  # 40%+
+                rule_score += 3
+            elif quantification_ratio >= 0.3:  # 30%+
+                rule_score += 2
+            elif quantification_ratio >= 0.2:  # 20%+
+                rule_score += 1
+            # Less than 20% quantification = 0 points
         else:
             # Fallback to number count
-            num_count = len(info["numbers"])
+            num_count = len(info.get("numbers", []))
             if num_count >= 10:
-                metric_score = 5
+                rule_score += 4
+            elif num_count >= 7:
+                rule_score += 3
             elif num_count >= 5:
-                metric_score = 4
-            else:
-                metric_score = 2
+                rule_score += 2
+            elif num_count >= 3:
+                rule_score += 1
         
-        rule_score += metric_score
+        # Content density (4 points) - STRICTER range
+        word_count = info.get("word_count", len(text.split()))
+        if 600 <= word_count <= 800:  # Optimal range (NARROWER)
+            rule_score += 4
+        elif 500 <= word_count <= 900:  # Acceptable
+            rule_score += 3
+        elif 400 <= word_count <= 1000:  # Marginal
+            rule_score += 2
+        elif 300 <= word_count <= 1200:  # Needs work
+            rule_score += 1
+        # Outside range = 0 points
         
-        # Content density (10 points) - Reward substantial content
-        word_count = info["word_count"]
-        if 500 <= word_count <= 900:  # Ideal range
-            density_score = 10
-        elif 400 <= word_count < 500 or 900 < word_count <= 1100:
-            density_score = 9
-        elif 300 <= word_count < 400 or 1100 < word_count <= 1300:
-            density_score = 7
-        elif 200 <= word_count < 300:
-            density_score = 5
-        else:
-            density_score = 3
-        rule_score += density_score
+        # Bullet points (24 points) - MAJOR differentiator, MUCH STRICTER
+        total_bullets = info.get("total_bullets", 0)
         
-        # MASSIVELY INCREASED: Bullet Count (35 points) - PRIMARY differentiator
-        # This is THE key indicator: TDS has 34 bullets (87% RW), Anas has 17 (56% RW)
-        # Bullet count signals experience depth and professional level
-        if total_bullets >= 30:
-            bullet_score = 37  # Senior/expert level (increased from 35)
-        elif total_bullets >= 25:
-            bullet_score = 32
-        elif total_bullets >= 20:
-            bullet_score = 27
-        elif total_bullets >= 15:
-            bullet_score = 20
-        elif total_bullets >= 12:
-            bullet_score = 14
-        elif total_bullets >= 8:
-            bullet_score = 8
-        elif total_bullets >= 5:
-            bullet_score = 4
-        else:
-            bullet_score = 1
+        if experience_level == "entry":
+            # Entry: 10-15 bullets expected (internships + projects)
+            if 12 <= total_bullets <= 15:
+                rule_score += 24  # Perfect for entry
+            elif 10 <= total_bullets <= 17:
+                rule_score += 20  # Very good
+            elif 8 <= total_bullets <= 19:
+                rule_score += 16  # Good
+            elif 6 <= total_bullets <= 21:
+                rule_score += 12  # Acceptable
+            elif 5 <= total_bullets <= 23:
+                rule_score += 8  # Needs improvement
+            elif total_bullets >= 4:
+                rule_score += 4  # Weak
+            # Less than 4 bullets = 0 points
+        elif experience_level == "mid":
+            # Mid: 18-25 bullets expected (multiple roles + projects)
+            if 20 <= total_bullets <= 25:
+                rule_score += 24  # Perfect for mid
+            elif 18 <= total_bullets <= 28:
+                rule_score += 20  # Very good
+            elif 15 <= total_bullets <= 30:
+                rule_score += 16  # Good
+            elif 12 <= total_bullets <= 32:
+                rule_score += 12  # Acceptable
+            elif 10 <= total_bullets <= 35:
+                rule_score += 8  # Needs improvement
+            elif total_bullets >= 8:
+                rule_score += 4  # Weak
+            # Less than 8 bullets = 0 points (unacceptable for mid)
+        else:  # senior
+            # Senior: 25-35 bullets expected (extensive experience)
+            if 28 <= total_bullets <= 35:
+                rule_score += 24  # Perfect for senior
+            elif 25 <= total_bullets <= 38:
+                rule_score += 20  # Very good
+            elif 20 <= total_bullets <= 40:
+                rule_score += 16  # Good
+            elif 18 <= total_bullets <= 42:
+                rule_score += 12  # Acceptable
+            elif 15 <= total_bullets <= 45:
+                rule_score += 8  # Needs improvement
+            elif total_bullets >= 12:
+                rule_score += 4  # Weak
+            # Less than 12 bullets = 0 points (unacceptable for senior)
         
-        rule_score += bullet_score
+        # STRICT SCORING BREAKDOWN (Aligned with ResumeWorded standards):
+        # ML Semantic: 10 points (reduced from 15)
+        # Contact: 3 points (essential requirement)
+        # Professional Identity: 2 points (LinkedIn/GitHub)
+        # Sections: 5 points (need 6+ sections for full score)
+        # Education: 6 points (level-dependent)
+        # Work Experience: 15 points (CRITICAL, level-dependent)
+        # Projects: 8 points (level-dependent)
+        # Action Verbs: 6 points (need 20+ for full score)
+        # Skills: 5 points (need 30+ for full score)
+        # Metrics: 7 points (need 70%+ quantification for full score)
+        # Content Density: 4 points (600-800 words optimal)
+        # Bullet Points: 24 points (PRIMARY differentiator, level-dependent)
+        # TOTAL: 10 + 90 = 100 points
+        # This is MUCH STRICTER than before - most resumes will score 40-60%
         
-        # Total: 20 (ML) + 82 (rules) = 102, capped at 100
-        # Rules: Contact(5) + Sections(10) + Verbs(8) + Skills(7) + Metrics(5) + Density(10) + BulletCount(37) = 82
         total_score = ml_score + rule_score
         return min(100, max(0, total_score))
     
-    def _calculate_rule_based_score(self, text: str, info: Dict) -> float:
-        """Fallback rule-based scoring when ML is not available"""
+    def _calculate_rule_based_score(self, text: str, info: Dict, experience_level: str = "entry") -> float:
+        """Fallback rule-based scoring when ML is not available - level-aware"""
+        # Note: This is a simpler version for when ML is unavailable
+        # For full level-aware scoring, the ML version is recommended
         score = 0
         
         # Contact info (8 points)
@@ -953,23 +1118,61 @@ class ResumeAnalyzerML:
         
         return min(100, max(0, score))
     
-    def _generate_insights(self, info: Dict, score: float) -> List[str]:
-        """Generate positive insights about the resume"""
+    def _generate_insights(self, info: Dict, score: float, experience_level: str = "entry") -> List[str]:
+        """Generate positive insights about the resume based on target level"""
         insights = []
         
+        # Level-specific messaging
+        level_labels = {
+            "entry": "Entry-Level",
+            "mid": "Mid-Level",
+            "senior": "Senior-Level"
+        }
+        
         if score >= 80:
-            insights.append("Excellent resume optimization for ATS systems")
+            insights.append(f"Excellent {level_labels[experience_level]} resume optimization for ATS systems")
         elif score >= 70:
-            insights.append("Very good resume structure with strong ATS compatibility")
+            insights.append(f"Very good {level_labels[experience_level]} resume structure with strong ATS compatibility")
         elif score >= 60:
-            insights.append("Good resume structure with room for enhancement")
+            insights.append(f"Good {level_labels[experience_level]} resume structure with room for enhancement")
         elif score >= 50:
-            insights.append("Decent resume foundation - follow recommendations to improve")
+            insights.append(f"Decent {level_labels[experience_level]} resume foundation - follow recommendations to improve")
         else:
-            insights.append("Resume needs improvement - focus on the recommendations below")
+            insights.append(f"{level_labels[experience_level]} resume needs improvement - focus on the recommendations below")
         
         if info["has_contact"]:
             insights.append("Complete contact information present")
+        
+        # Professional links - NEW
+        if info.get("linkedin") and info.get("github"):
+            insights.append("Strong professional presence with LinkedIn and GitHub profiles")
+        elif info.get("linkedin") or info.get("github"):
+            insights.append("Professional profile link included")
+        
+        # Education - NEW
+        education_count = len(info.get("education", []))
+        if education_count >= 2:
+            insights.append(f"Multiple degrees listed ({education_count} found)")
+        elif education_count == 1:
+            insights.append("Educational background included")
+        
+        # Work Experience - NEW
+        work_exp_count = len(info.get("work_experience", []))
+        if work_exp_count >= 3:
+            insights.append(f"Rich work history with {work_exp_count} experiences")
+        elif work_exp_count >= 2:
+            insights.append(f"Good work history with {work_exp_count} experiences")
+        elif work_exp_count == 1:
+            insights.append("Work experience included")
+        
+        # Projects - NEW
+        project_count = len(info.get("projects", []))
+        if project_count >= 3:
+            insights.append(f"Strong project portfolio with {project_count} projects")
+        elif project_count >= 2:
+            insights.append(f"Good project showcase with {project_count} projects")
+        elif project_count == 1:
+            insights.append("Project work demonstrated")
         
         if len(info["sections"]) >= 5:
             insights.append(f"Well-structured with {len(info['sections'])} key sections")
@@ -999,9 +1202,24 @@ class ResumeAnalyzerML:
         
         return insights
     
-    def _generate_recommendations(self, info: Dict, score: float) -> List[str]:
-        """Generate recommendations for improvement"""
+    def _generate_recommendations(self, info: Dict, score: float, experience_level: str = "entry") -> List[str]:
+        """Generate level-appropriate recommendations for improvement"""
         recommendations = []
+        
+        work_exp_count = len(info.get("work_experience", []))
+        project_count = len(info.get("projects", []))
+        education_count = len(info.get("education", []))
+        total_bullets = info.get("total_bullets", 0)
+        
+        # Professional identity
+        if not info.get("name"):
+            recommendations.append("📛 Add your full name at the top of your resume")
+        
+        if not info.get("linkedin") and not info.get("github"):
+            if experience_level == "entry":
+                recommendations.append("🔗 Add LinkedIn profile (essential) or GitHub (if technical)")
+            else:
+                recommendations.append("🔗 Add LinkedIn and GitHub profiles to strengthen professional presence")
         
         # Contact info
         if not info["has_contact"]:
@@ -1010,13 +1228,90 @@ class ResumeAnalyzerML:
             if not info["phone"]:
                 recommendations.append("⚠️ Add your phone number for easy contact")
         
+        # Education - Level-specific expectations
+        if education_count == 0:
+            recommendations.append("🎓 Add an Education section with your degree, institution, and graduation year")
+        elif education_count == 1:
+            edu = info.get("education", [{}])[0]
+            if not edu.get("institution"):
+                recommendations.append("🎓 Include the name of your educational institution")
+            if not edu.get("degree"):
+                recommendations.append("🎓 Specify your degree/major in the Education section")
+            if experience_level == "senior" and not edu.get("degree"):
+                recommendations.append("🎓 Consider adding advanced degrees or certifications if applicable")
+        
+        # Work Experience - CRITICAL level-specific recommendations
+        if experience_level == "entry":
+            # Entry: Focus on getting ANY experience or strong projects
+            if work_exp_count == 0:
+                if project_count < 3:
+                    recommendations.append("💼 Add internships, volunteer work, or part-time jobs to demonstrate experience")
+                    recommendations.append("🚀 Include 3-4 substantial projects to compensate for limited work experience")
+            elif work_exp_count == 1:
+                recommendations.append("💼 Add more internships or part-time experiences if available")
+        
+        elif experience_level == "mid":
+            # Mid: Need 2-3 professional experiences
+            if work_exp_count == 0:
+                recommendations.append("⚠️ CRITICAL: Mid-level positions require 2-3 years work experience - add all relevant roles")
+            elif work_exp_count == 1:
+                recommendations.append("💼 Add more work experiences - mid-level roles typically require 2-3 positions")
+            elif work_exp_count == 2:
+                recommendations.append("💼 Consider adding additional relevant experiences to strengthen your profile")
+        
+        else:  # senior
+            # Senior: Need 3+ experiences showing progression
+            if work_exp_count < 3:
+                recommendations.append("⚠️ CRITICAL: Senior positions require 3+ work experiences showing career progression")
+            elif work_exp_count == 3:
+                recommendations.append("💼 Consider adding more experiences to demonstrate extensive background (4+ is ideal)")
+        
+        # Projects - Level-specific expectations
+        if experience_level == "entry":
+            # Entry: Projects are ESSENTIAL
+            if project_count == 0:
+                recommendations.append("🚀 CRITICAL: Add 3-4 projects to demonstrate your skills (essential for entry-level)")
+            elif project_count == 1:
+                recommendations.append("🚀 Add more projects (aim for 3-4) - crucial for entry-level candidates")
+            elif project_count == 2:
+                recommendations.append("🚀 Add 1-2 more projects to strengthen your portfolio")
+        
+        elif experience_level == "mid":
+            # Mid: Projects show initiative
+            if project_count == 0 and work_exp_count < 3:
+                recommendations.append("🚀 Add 2-3 projects to demonstrate continued skill development")
+            elif project_count == 1:
+                recommendations.append("🚀 Add more projects to showcase diverse skills and initiative")
+        
+        else:  # senior
+            # Senior: Projects are nice-to-have
+            if project_count == 0:
+                recommendations.append("🚀 Consider adding 1-2 notable projects or technical leadership examples")
+        
+        # Bullet count - Level-specific expectations
+        if experience_level == "entry":
+            if total_bullets < 10:
+                recommendations.append(f"📝 Add more bullet points (currently {total_bullets}, aim for 12-20 for entry-level)")
+            elif total_bullets < 12:
+                recommendations.append(f"� Add a few more details (currently {total_bullets}, aim for 15-20)")
+        elif experience_level == "mid":
+            if total_bullets < 20:
+                recommendations.append(f"📝 Add more accomplishment bullets (currently {total_bullets}, aim for 20-30 for mid-level)")
+            elif total_bullets < 25:
+                recommendations.append(f"📝 Expand your accomplishments (currently {total_bullets}, aim for 25-30)")
+        else:  # senior
+            if total_bullets < 30:
+                recommendations.append(f"📝 Add more detailed accomplishments (currently {total_bullets}, aim for 30-35+ for senior-level)")
+            elif total_bullets < 35:
+                recommendations.append(f"📝 Expand on your leadership impact (currently {total_bullets}, aim for 35+)")
+        
         # Sections
         missing_sections = set(["experience", "education", "skills", "summary"]) - set(info["sections"])
         if missing_sections:
             for section in missing_sections:
                 recommendations.append(f"📝 Add a '{section.title()}' section to improve structure")
         
-        # Repetitive action verbs - New ResumeWorded check
+        # Repetitive action verbs
         repetitive_verbs = info.get("repetitive_verbs", {})
         if repetitive_verbs:
             for verb, count in repetitive_verbs.items():

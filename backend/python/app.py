@@ -209,10 +209,11 @@ def analyze_text_ml():
             }), 400
         
         text = data['text']
+        target_level = data.get('targetLevel', None)  # 'entry', 'mid', 'senior'
         
         # Use ML analyzer
         analyzer = get_ml_analyzer()
-        result = analyzer.analyze_resume(text)
+        result = analyzer.analyze_resume(text, target_level)
         
         return jsonify(result)
         
@@ -265,9 +266,12 @@ def analyze_pdf_ml():
                 'error': 'Failed to extract text from PDF'
             }), 500
         
+        # Get target level from form data or JSON
+        target_level = request.form.get('targetLevel') if request.files else request.get_json().get('targetLevel')
+        
         # Step 2: Analyze text with ML
         analyzer = get_ml_analyzer()
-        analysis_result = analyzer.analyze_resume(text)
+        analysis_result = analyzer.analyze_resume(text, target_level)
         
         # Add extracted text to response
         analysis_result['extractedText'] = text
