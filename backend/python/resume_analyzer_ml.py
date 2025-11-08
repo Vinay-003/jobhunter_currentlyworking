@@ -164,40 +164,49 @@ class ResumeAnalyzerML:
         """
         Basic grammar/spelling check
         Returns: score (0-5)
-        More lenient - focuses on critical errors only
+        Balanced - checks for common issues
         """
         errors = 0
         
-        # Check for excessive double spaces (more than 5 instances)
+        # Check for double spaces (any instance counts)
         double_space_count = text.count('  ')
-        if double_space_count > 5:
-            errors += (double_space_count - 5) // 10
+        if double_space_count > 10:
+            errors += 2
+        elif double_space_count > 5:
+            errors += 1
         
-        # Check for common critical typos only
+        # Check for common typos
         critical_typos = [
             'teh ', 'recieve', 'occured', 'seperate', 'definately',
-            'experiance', 'responcible', 'managment', 'acheivement'
+            'experiance', 'responcible', 'managment', 'acheivement',
+            'refered', 'succesful', 'profesional', 'adress'
         ]
         for typo in critical_typos:
             if typo in text.lower():
-                errors += 1
+                errors += 2  # Each typo counts more
         
-        # Check for missing punctuation at end of sentences (bullets)
+        # Check for inconsistent capitalization
         lines = text.split('\n')
-        bullet_lines = [l.strip() for l in lines if l.strip().startswith(('•', '-', '◦', '*'))]
-        # Most professional resumes don't end bullets with periods, so don't penalize
+        for line in lines:
+            line = line.strip()
+            # Check for sentences starting with lowercase (not bullets)
+            if len(line) > 0 and line[0].islower() and not line.startswith(('•', '-', '◦', '*', 'i.e', 'e.g')):
+                if len(line) > 20:  # Only count substantial lines
+                    errors += 0.5
         
-        # Score based on critical errors only
+        # Score based on errors
         if errors == 0:
             return 5.0
         elif errors <= 1:
             return 4.0
-        elif errors <= 3:
+        elif errors <= 2:
             return 3.0
-        elif errors <= 5:
+        elif errors <= 4:
             return 2.0
-        else:
+        elif errors <= 6:
             return 1.0
+        else:
+            return 0.0
     
     def _detect_tailoring(self, text: str) -> bool:
         """
@@ -255,7 +264,7 @@ class ResumeAnalyzerML:
     
     def _check_tone_readability(self, text: str) -> float:
         """
-        Check professional tone and readability - More lenient
+        Check professional tone and readability - Balanced
         Returns: score (0-3)
         """
         score = 3.0  # Start with full points
@@ -265,24 +274,28 @@ class ResumeAnalyzerML:
         valid_sentences = [s for s in sentences if len(s.strip().split()) > 3]
         
         if len(valid_sentences) == 0:
-            return 2.0  # Give credit for concise resume
+            return 1.5  # Some credit for concise resume
         
         avg_words_per_sentence = sum(len(s.split()) for s in valid_sentences) / len(valid_sentences)
         
-        # Only penalize VERY long sentences (resume bullets should be concise)
-        if avg_words_per_sentence > 40:  # Raised threshold
+        # Penalize long sentences (resume bullets should be concise)
+        if avg_words_per_sentence > 35:
+            score -= 1.5
+        elif avg_words_per_sentence > 30:
             score -= 1.0
-        elif avg_words_per_sentence > 35:
+        elif avg_words_per_sentence > 25:
             score -= 0.5
         
-        # Check for excessive passive voice (be more lenient)
+        # Check for passive voice
         passive_indicators = ['was ', 'were ', 'been ', 'being ']
         passive_count = sum(text.lower().count(word) for word in passive_indicators)
         total_words = len(text.split())
         passive_ratio = passive_count / max(total_words, 1)
         
-        # Only penalize if EXCESSIVE passive voice (>8%)
-        if passive_ratio > 0.08:  # More than 8% passive (was 5%)
+        # Penalize passive voice (aim for <5%)
+        if passive_ratio > 0.10:  # More than 10% passive
+            score -= 1.0
+        elif passive_ratio > 0.06:  # More than 6% passive
             score -= 0.5
         
         return max(0.0, score)
@@ -1433,8 +1446,8 @@ class ResumeAnalyzerML:
             # Use top 5 similarities for better coverage
             top_similarities = torch.topk(similarities, k=min(5, len(similarities))).values
             avg_top_similarity = torch.mean(top_similarities).item()
-            # Boost ML score slightly (multiply by 25 instead of 20 to allow scores up to full 20)
-            ml_score = min(20.0, avg_top_similarity * 25)
+            # More strict: multiply by 22 instead of 25
+            ml_score = min(20.0, avg_top_similarity * 22)
         
         score_breakdown['ml_semantic_score'] = round(ml_score, 1)
         
@@ -1491,16 +1504,19 @@ class ResumeAnalyzerML:
         # Check for missing contact penalty
         contact_penalty = -10 if not info.get("has_contact") else 0
         
-        # 2.6 Bullet Usage & Density: 5 points
+        # 2.6 Bullet Usage & Density: 5 points (stricter)
         total_bullets = info.get("total_bullets", 0)
         work_exp_count = len(info.get("work_experience", []))
         
         if work_exp_count > 0:
             avg_bullets = total_bullets / work_exp_count
-            if 3 <= avg_bullets <= 6:
+            # Ideal: 4-5 bullets per experience
+            if 4 <= avg_bullets <= 5:
                 bullet_density_score = 5.0
+            elif 3 <= avg_bullets <= 6:
+                bullet_density_score = 4.0
             elif 2 <= avg_bullets <= 7:
-                bullet_density_score = 3.0
+                bullet_density_score = 2.5
             elif avg_bullets >= 1:
                 bullet_density_score = 1.0
             else:
@@ -1517,24 +1533,53 @@ class ResumeAnalyzerML:
         
         content_score = 0.0
         
-        # 3.1 Summary/Profile Quality: 5 points
-        # Check for summary section or objective statement
+        # 3.1 Summary/Profile Quality: 5 points (stricter)
+        # Check for summary section with meaningful content
         text_lower = text.lower()
         has_summary = any(keyword in text_lower for keyword in ['summary', 'objective', 'profile', 'about me'])
-        summary_score = 5.0 if has_summary else 0.0
+        
+        if has_summary:
+            # Find summary section and check length
+            summary_keywords_pos = []
+            for keyword in ['summary', 'objective', 'profile']:
+                pos = text_lower.find(keyword)
+                if pos != -1:
+                    summary_keywords_pos.append(pos)
+            
+            if summary_keywords_pos:
+                # Get text after summary keyword (next ~200 chars)
+                start_pos = min(summary_keywords_pos)
+                summary_text = text[start_pos:start_pos+300]
+                summary_words = len(summary_text.split())
+                
+                if summary_words >= 30:  # Substantial summary
+                    summary_score = 5.0
+                elif summary_words >= 20:
+                    summary_score = 3.5
+                elif summary_words >= 10:
+                    summary_score = 2.0
+                else:
+                    summary_score = 0.5
+            else:
+                summary_score = 0.5
+        else:
+            summary_score = 0.0
+        
         content_score += summary_score
         score_breakdown['summary_score'] = round(summary_score, 1)
         
-        # 3.2 Skills Section Clarity & Grouping: 6 points
+        # 3.2 Skills Section Clarity & Grouping: 6 points (stricter)
         skills_count = len(info.get("skills", []))
-        if skills_count >= 25:
+        if skills_count >= 30:  # Raised from 25
             skills_clarity_score = 6.0
-        elif skills_count >= 20:
+        elif skills_count >= 25:
             skills_clarity_score = 5.0
-        elif skills_count >= 15:
+        elif skills_count >= 20:
             skills_clarity_score = 4.0
+        elif skills_count >= 15:
+            skills_clarity_score = 2.5
         elif skills_count >= 10:
-            skills_clarity_score = 2.0
+            skills_clarity_score = 1.0
         else:
             skills_clarity_score = 0.0
         content_score += skills_clarity_score
@@ -1620,43 +1665,41 @@ class ResumeAnalyzerML:
         skills_keywords_score += hard_skills_score
         score_breakdown['hard_skills_score'] = round(hard_skills_score, 1)
         
-        # 4.2 Action Verbs & Achievement Language: 5 points (more lenient)
+        # 4.2 Action Verbs & Achievement Language: 5 points (balanced)
         verb_count = len(info.get("action_verbs", []))
-        if verb_count >= 12:  # Lowered from 15
+        if verb_count >= 15:  # Back to strict
             action_verbs_score = 5.0
-        elif verb_count >= 10:  # Lowered from 12
+        elif verb_count >= 12:
             action_verbs_score = 4.0
-        elif verb_count >= 8:  # Lowered from 10
-            action_verbs_score = 3.5
-        elif verb_count >= 6:
-            action_verbs_score = 2.5
-        elif verb_count >= 4:  # New tier
-            action_verbs_score = 1.5
+        elif verb_count >= 10:
+            action_verbs_score = 3.0
+        elif verb_count >= 8:
+            action_verbs_score = 2.0
+        elif verb_count >= 5:
+            action_verbs_score = 1.0
         else:
-            action_verbs_score = 0.5  # Give some credit for any verbs
+            action_verbs_score = 0.0  # No credit for too few
         skills_keywords_score += action_verbs_score
         score_breakdown['action_verbs_score'] = round(action_verbs_score, 1)
         
-        # 4.3 Quantified Achievements Detection: 5 points (more lenient)
+        # 4.3 Quantified Achievements Detection: 5 points (stricter)
         quantified_bullets = info.get("quantified_bullets", 0)
         if total_bullets > 0:
             quantification_ratio = quantified_bullets / total_bullets
-            if quantification_ratio >= 0.4:  # Lowered from 0.5
+            if quantification_ratio >= 0.5:  # Back to strict
                 quantification_score = 5.0
-            elif quantification_ratio >= 0.3:  # Lowered from 0.4
+            elif quantification_ratio >= 0.4:
                 quantification_score = 4.0
-            elif quantification_ratio >= 0.25:  # Lowered from 0.3
-                quantification_score = 3.5
-            elif quantification_ratio >= 0.15:  # Lowered from 0.2
-                quantification_score = 2.5
-            elif quantification_ratio >= 0.10:
-                quantification_score = 1.5
-            elif quantification_ratio >= 0.05:  # New tier
+            elif quantification_ratio >= 0.3:
+                quantification_score = 3.0
+            elif quantification_ratio >= 0.2:
+                quantification_score = 2.0
+            elif quantification_ratio >= 0.15:
                 quantification_score = 1.0
             else:
-                quantification_score = 0.5  # Give some credit
+                quantification_score = 0.0  # No credit for too few
         else:
-            quantification_score = 0.5  # Small credit even with no bullets
+            quantification_score = 0.0  # No bullets = no score
         
         skills_keywords_score += quantification_score
         score_breakdown['quantification_score'] = round(quantification_score, 1)
@@ -1706,22 +1749,25 @@ class ResumeAnalyzerML:
         education_score += education_details_score
         score_breakdown['education_details_score'] = round(education_details_score, 1)
         
-        # 5.2 Certifications & Courses: 4 points
+        # 5.2 Certifications & Courses: 4 points (stricter)
         # Check for certification keywords in text
         cert_keywords = [
-            'certified', 'certification', 'certificate', 'coursera', 'udemy',
-            'aws certified', 'google cloud', 'microsoft certified', 'cisco',
-            'comptia', 'pmp', 'scrum master', 'agile certified'
+            'aws certified', 'google cloud certified', 'microsoft certified', 
+            'cisco certified', 'comptia', 'pmp certified', 'scrum master',
+            'oracle certified', 'red hat certified', 'cfa', 'cpa'
         ]
         text_lower = text.lower()
         cert_count = sum(1 for keyword in cert_keywords if keyword in text_lower)
         
-        if cert_count >= 3:
+        # Also check for certificate section
+        has_cert_section = any(keyword in text_lower for keyword in ['certifications', 'certificates', 'licenses'])
+        
+        if cert_count >= 3 or (cert_count >= 2 and has_cert_section):
             certifications_score = 4.0
         elif cert_count >= 2:
             certifications_score = 3.0
         elif cert_count >= 1:
-            certifications_score = 2.0
+            certifications_score = 1.5
         else:
             certifications_score = 0.0
         
@@ -1774,24 +1820,24 @@ class ResumeAnalyzerML:
         
         score_breakdown['length_score'] = round(length_score, 1)
         
-        # ============ 8. BONUSES (Max +6) ============
+        # ============ 8. BONUSES (Max +4, reduced from +6) ============
         
         bonuses = 0.0
         
-        # Tailoring detected: +3 points
+        # Tailoring detected: +2 points (reduced from +3)
         if self._detect_tailoring(text):
-            bonuses += 3.0
-            score_breakdown['tailoring_bonus'] = 3.0
-        
-        # Leadership/Ownership: +2 points
-        if self._detect_leadership(text):
             bonuses += 2.0
-            score_breakdown['leadership_bonus'] = 2.0
+            score_breakdown['tailoring_bonus'] = 2.0
         
-        # OSS Contributions: +1 point
+        # Leadership/Ownership: +1.5 points (reduced from +2)
+        if self._detect_leadership(text):
+            bonuses += 1.5
+            score_breakdown['leadership_bonus'] = 1.5
+        
+        # OSS Contributions: +0.5 point (reduced from +1)
         if self._detect_oss_contributions(text):
-            bonuses += 1.0
-            score_breakdown['oss_bonus'] = 1.0
+            bonuses += 0.5
+            score_breakdown['oss_bonus'] = 0.5
         
         score_breakdown['total_bonuses'] = round(bonuses, 1)
         
