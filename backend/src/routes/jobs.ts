@@ -147,14 +147,14 @@ router.get('/jobs/recommendations', authenticateToken, async (req, res) => {
       hasProjects: !!resume.analysis_data.extractedInfo?.projects,
       hasEducation: !!resume.analysis_data.extractedInfo?.education,
       missingNewFields,
-      willReanalyze: hasLimitedSkills || missingNewFields
+      willReanalyze: true  // FORCED TO TRUE - Always reanalyze for now
     });
     
     console.log('📊 FULL extractedInfo.skills ARRAY:', JSON.stringify(resume.analysis_data.extractedInfo?.skills || [], null, 2));
     console.log('📚 EDUCATION:', JSON.stringify(resume.analysis_data.extractedInfo?.education || 'none', null, 2));
     console.log('🚀 PROJECTS:', JSON.stringify(resume.analysis_data.extractedInfo?.projects || 'none', null, 2));
     
-    const needsReanalysis = hasLimitedSkills || missingNewFields;
+    const needsReanalysis = true;  // FORCED TO TRUE - Always reanalyze for now
 
     if (needsReanalysis) {
       console.log('⚠️  Detected outdated analysis. Re-analyzing resume with enhanced parser...');

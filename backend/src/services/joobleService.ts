@@ -306,8 +306,9 @@ export class JoobleService {
     details.hasContact = info.has_contact || !!(info.email || info.phone);
     details.hasWorkExperience = (info.work_experience?.length || 0) > 0;
     details.hasEducation = (info.education?.length || 0) > 0;
-    details.wordCount = info.word_count || 0;
-    details.bulletCount = info.total_bullets || 0;
+    // Word count and bullet count are in metrics object, not extractedInfo
+    details.wordCount = analysis.metrics?.wordCount || info.word_count || 0;
+    details.bulletCount = analysis.metrics?.totalBullets || info.total_bullets || 0;
 
     // VALIDATION RULES (must pass at least 3 out of 5 checks)
     const checks = {

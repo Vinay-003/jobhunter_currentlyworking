@@ -109,9 +109,12 @@ class ResumeAnalyzerML:
         
         # Calculate ATS score using ML if available, otherwise use rules
         if self.model is not None:
-            ats_score = self._calculate_ml_ats_score(text, extracted_info, experience_level)
+            score_result = self._calculate_ml_ats_score(text, extracted_info, experience_level)
+            ats_score = score_result['total_score']
+            score_breakdown = score_result
         else:
             ats_score = self._calculate_rule_based_score(text, extracted_info, experience_level)
+            score_breakdown = {'total_score': ats_score}
         
         # Generate insights and recommendations based on target level
         insights = self._generate_insights(extracted_info, ats_score, experience_level)
@@ -127,6 +130,7 @@ class ResumeAnalyzerML:
             "statusMessage": status_message,
             "insights": insights,
             "recommendations": recommendations,
+            "scoreBreakdown": score_breakdown,
             "metrics": {
                 "wordCount": extracted_info["word_count"],
                 "sectionsFound": len(extracted_info["sections"]),
@@ -195,21 +199,21 @@ class ResumeAnalyzerML:
         linkedin = None
         linkedin_patterns = [
             r'linkedin\.com/in/([a-zA-Z0-9-]+)',
-            r'LinkedIn:\s*([a-zA-Z0-9-]+)',
-            r'linkedin:\s*([a-zA-Z0-9-]+)'
+            r'LinkedIn:\s*@?([a-zA-Z0-9-]+)',  # Support @username format
+            r'linkedin:\s*@?([a-zA-Z0-9-]+)'
         ]
         for pattern in linkedin_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
-                linkedin = match.group(1) if '/' in pattern else match.group(1)
+                linkedin = match.group(1)
                 break
         
         # Extract GitHub URL
         github = None
         github_patterns = [
             r'github\.com/([a-zA-Z0-9-]+)',
-            r'Github:\s*([a-zA-Z0-9-]+)',
-            r'github:\s*([a-zA-Z0-9-]+)'
+            r'Github:\s*@?([a-zA-Z0-9-]+)',  # Support @username format
+            r'github:\s*@?([a-zA-Z0-9-]+)'
         ]
         for pattern in github_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
@@ -268,19 +272,54 @@ class ResumeAnalyzerML:
         # Detect repetitive verbs (used more than 2 times) - ResumeWorded penalty
         repetitive_verbs = {verb: count for verb, count in action_verb_frequency.items() if count > 2}
         
-        # Count bullet points
+        # Count bullet points and collect full bullet text (handling multi-line bullets)
         bullet_pattern = r'^\s*[•\-\*◦▪]\s+'
-        total_bullets = sum(1 for line in lines if re.match(bullet_pattern, line))
+        bullets_full_text = []
+        current_bullet = None
+        
+        for line in lines:
+            if re.match(bullet_pattern, line):
+                # Save previous bullet
+                if current_bullet:
+                    bullets_full_text.append(current_bullet)
+                # Start new bullet
+                current_bullet = line
+            elif current_bullet and line.strip():
+                # Continuation of current bullet (non-empty line after bullet start)
+                current_bullet += ' ' + line
+        
+        # Don't forget the last bullet
+        if current_bullet:
+            bullets_full_text.append(current_bullet)
+        
+        total_bullets = len(bullets_full_text)
         
         # Numbers and metrics - count overall and per bullet
         numbers = re.findall(r'\b\d+[%$,kmKMbB]?\b', text)
         
         # Count quantified bullets (bullets with numbers/metrics)
+        # Much more comprehensive patterns for quantification
         quantified_bullets = 0
-        for line in lines:
-            if re.match(bullet_pattern, line):
-                if re.search(r'\d+[\d,]*\.?\d*\s*(%|percent|million|thousand|users|customers|revenue|\$|hours|days|weeks|months|years|projects|items)', line.lower()):
-                    quantified_bullets += 1
+        quantification_patterns = [
+            r'\d+\s*%',  # 30%, 30 %
+            r'\d+\s*(percent|percentage)',  # 30 percent
+            r'\$\s*\d+',  # $1000
+            r'\d+[\d,]*\s*(million|thousand|billion|k|m|b)\b',  # 1 million, 500k
+            r'\d+[\d,]*\+?\s*(users|customers|clients|people|participants|members|students|engineers)',  # 500+ users
+            r'\d+[\d,]*\s*(hours|days|weeks|months|years)',  # 3 months
+            r'\d+[\d,]*\s*(projects|features|components|modules|systems|applications|apps)',  # 5 projects
+            r'\d+[\d,]*\s*(x|times)',  # 2x, 3 times
+            r'(increased|decreased|reduced|improved|boosted|grew|raised|cut|saved|enhanced)\s+\w*\s*by\s*\d+',  # increased by 30
+            r'(over|more than|under|less than|up to)\s+\d+',  # over 100
+            r'\d+[\d,]*\s*(metrics|kpis|tickets|issues|bugs|tests)',  # 50 tickets
+            r'\d+[\d,]*\s*(revenue|sales|profit|cost|budget)',  # $50k revenue
+            r'from\s+\d+.*to\s+\d+',  # from 10 to 50
+        ]
+        
+        for bullet_text in bullets_full_text:
+            # Check if any quantification pattern matches in the full bullet text
+            if any(re.search(pattern, bullet_text.lower()) for pattern in quantification_patterns):
+                quantified_bullets += 1
         
         # Enhanced skills extraction with comprehensive list
         common_skills = [
@@ -483,70 +522,100 @@ class ResumeAnalyzerML:
         current_duration = None
         current_description = []
         
-        for line in lines:
-            line = line.strip()
+        # Enhanced date pattern to match various formats including all abbreviations
+        date_pattern = r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)\.?,?\s*\d{4}\s*[-–—]\s*(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)\.?,?\s*\d{4}|Present|Current|present|current)'
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Skip empty lines and section headers
             if not line or line.lower() in experience_keywords:
+                i += 1
                 continue
             
-            # Check if line contains a date range pattern
-            date_pattern = r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)\.?\s*\d{4}\s*[-–—]\s*(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)\.?\s*\d{4}|Present|Current|present|current)'
+            # Check if this line has a date (inline format)
             date_match = re.search(date_pattern, line, re.IGNORECASE)
             
             if date_match:
                 # Save previous experience if exists
-                if current_org:
+                if current_org or current_role:
                     experience_list.append({
-                        "organization": current_org,
-                        "role": current_role,
+                        "organization": current_org or "Unknown",
+                        "role": current_role or "Unknown",
                         "duration": current_duration,
                         "description": ' '.join(current_description)
                     })
                 
-                # Start new experience
+                # Start new experience - date on same line as role/org
                 current_duration = date_match.group()
-                # Extract organization and role from the line
                 parts = line.split(date_match.group())
                 before_date = parts[0].strip()
                 
                 # Check if there's a hyphen or dash indicating role
-                if '-' in before_date:
-                    org_role = before_date.split('-', 1)
+                if '-' in before_date or '|' in before_date:
+                    separator = '-' if '-' in before_date else '|'
+                    org_role = before_date.split(separator, 1)
                     current_org = org_role[0].strip()
                     current_role = org_role[1].strip() if len(org_role) > 1 else None
                 else:
                     current_org = before_date
                     current_role = None
                 
-                # Description might be after the date
-                if len(parts) > 1:
-                    after_date = parts[1].strip()
-                    if after_date and after_date.startswith('-'):
-                        after_date = after_date[1:].strip()
-                    if after_date:
-                        current_description = [after_date]
-                    else:
-                        current_description = []
-                else:
+                current_description = []
+                i += 1
+                
+            # Check if next 2 lines form a 3-line format: Role, Organization, Date
+            elif i + 2 < len(lines):
+                next_line = lines[i + 1].strip()
+                next_next_line = lines[i + 2].strip()
+                
+                # Check if line after next has a date pattern
+                date_match_ahead = re.search(date_pattern, next_next_line, re.IGNORECASE)
+                
+                if date_match_ahead and not line.startswith(('-', '•', '*', '◦', '▪')):
+                    # Save previous experience if exists
+                    if current_org or current_role:
+                        experience_list.append({
+                            "organization": current_org or "Unknown",
+                            "role": current_role or "Unknown",
+                            "duration": current_duration,
+                            "description": ' '.join(current_description)
+                        })
+                    
+                    # Format: Line1=Role, Line2=Organization, Line3=Date
+                    current_role = line
+                    current_org = next_line
+                    current_duration = date_match_ahead.group()
                     current_description = []
                     
-            elif current_org and (line.startswith(('-', '•', '*', '◦', '▪')) or (current_description and len(line) > 10)):
+                    i += 3  # Skip all 3 lines
+                    continue
+            
+            # Handle bullet points (description lines)
+            if (current_org or current_role) and (line.startswith(('-', '•', '*', '◦', '▪')) or (current_description and len(line) > 10)):
                 # Add to current description
                 if line.startswith(('-', '•', '*', '◦', '▪')):
                     line = line[1:].strip()
                 current_description.append(line)
+                i += 1
+                
+            # Might be organization name without date format (fallback)
             elif not current_org and not line.startswith(('-', '•', '*', '◦', '▪')):
-                # Might be organization name without date format
                 if len(line.split()) <= 6 and not any(char.isdigit() for char in line):
                     current_org = line
                     current_role = None
                     current_duration = None
                     current_description = []
+                i += 1
+            else:
+                i += 1
         
         # Save last experience
-        if current_org:
+        if current_org or current_role:
             experience_list.append({
-                "organization": current_org,
-                "role": current_role,
+                "organization": current_org or "Unknown",
+                "role": current_role or "Unknown",
                 "duration": current_duration,
                 "description": ' '.join(current_description)
             })
@@ -574,7 +643,7 @@ class ResumeAnalyzerML:
             return projects_list
         
         # Extract text from projects section (until next major section)
-        next_section_keywords = ['education', 'experience', 'skills', 'certifications', 'languages', 'links']
+        next_section_keywords = ['education', 'experience', 'skills', 'certifications', 'languages', 'links', 'achievements', 'summary']
         projects_section_end = len(text)
         
         for keyword in next_section_keywords:
@@ -597,42 +666,78 @@ class ResumeAnalyzerML:
                 i += 1
                 continue
             
-            # Check if current line has technology separator
+            # Check if current line has technology separator (Project Name | Technologies)
             if '|' in line and not line.startswith(('-', '•', '*', '◦', '▪')):
-                # This line has format: "Category | Technology" or "Project Name | Technology"
-                parts = line.split('|')
+                # This line has format: "Project Name | Technologies"
+                parts = line.split('|', 1)  # Split only on first |
                 project_name = parts[0].strip()
                 technology = parts[1].strip() if len(parts) > 1 else ""
                 
-                # Check if previous non-bullet line could be the project name
-                # (in case format is: Name on one line, Category | Tech on next line)
-                if (i > 0 and 
-                    not lines[i-1].startswith(('-', '•', '*', '◦', '▪', 'http', 'github', 'gitlab', 'link')) and
-                    len(lines[i-1].split()) <= 3 and
-                    not any(keyword in lines[i-1].lower() for keyword in project_keywords)):
-                    # Previous line is likely the actual project name
-                    project_name = lines[i-1]
+                # Continue collecting technology from continuation lines (lines that end with comma or look like tech)
+                j = i + 1
+                tech_parts = [technology]
+                while j < len(lines):
+                    next_line = lines[j]
+                    # Check if this is a continuation of technologies:
+                    # - Doesn't start with bullet
+                    # - Doesn't start with http/github/link
+                    # - No pipe character (not another project)
+                    # - Either: starts with capital letter followed by comma-separated items OR previous tech line ended with comma
+                    if (not next_line.startswith(('-', '•', '*', '◦', '▪')) and
+                        not next_line.lower().startswith(('http', 'github', 'gitlab', 'link')) and
+                        '|' not in next_line):
+                        # Check if it looks like technology (has commas or ends with comma or is short technical term)
+                        if (',' in next_line or 
+                            tech_parts[-1].endswith(',') or
+                            (len(next_line.split()) <= 2 and len(next_line) < 30)):
+                            tech_parts.append(next_line)
+                            j += 1
+                            # Stop if this line doesn't end with comma (tech list ended)
+                            if not next_line.endswith(','):
+                                break
+                        else:
+                            # Not a tech continuation
+                            break
+                    else:
+                        break
+                
+                # Join all technology parts
+                technology = ' '.join(tech_parts).strip()
+                
+                # Look for subtitle/description line (non-bullet, not a link, reasonable length)
+                subtitle = ""
+                if j < len(lines):
+                    next_line = lines[j]
+                    # If next line is not a bullet and not a link and reasonable length, it's a subtitle
+                    if (not next_line.startswith(('-', '•', '*', '◦', '▪')) and
+                        not next_line.lower().startswith(('http', 'github', 'gitlab', 'link')) and
+                        '|' not in next_line and
+                        15 < len(next_line) < 100):
+                        subtitle = next_line
+                        j += 1
                 
                 # Collect description from following bullet points
                 description_parts = []
-                j = i + 1
+                if subtitle:
+                    description_parts.append(subtitle)
+                
                 while j < len(lines):
                     next_line = lines[j]
                     if next_line.startswith(('-', '•', '*', '◦', '▪')):
+                        # Remove bullet and add to description
                         cleaned = next_line[1:].strip()
-                        description_parts.append(cleaned)
+                        if cleaned:
+                            description_parts.append(cleaned)
                         j += 1
-                    elif next_line.lower().startswith(('github', 'gitlab', 'http', 'link')):
+                    elif next_line.lower().startswith(('github', 'gitlab', 'http', 'link', '•')):
                         # Skip link lines
                         j += 1
-                    elif '|' in next_line or (len(next_line.split()) <= 3 and not next_line.startswith(('-', '•', '*'))):
-                        # Hit next project or project name
+                    elif '|' in next_line and not next_line.startswith(('-', '•', '*')):
+                        # Hit next project
                         break
                     else:
-                        # Could be continuation or description
-                        if len(next_line) > 20:
-                            description_parts.append(next_line)
-                        j += 1
+                        # Stop at next project/section
+                        break
                 
                 projects_list.append({
                     "name": project_name,
@@ -641,12 +746,6 @@ class ResumeAnalyzerML:
                 })
                 
                 i = j
-            elif (not line.startswith(('-', '•', '*', '◦', '▪', 'http', 'github', 'gitlab')) and
-                  i + 1 < len(lines) and
-                  '|' in lines[i + 1]):
-                # This is a project name, next line has technology
-                # Will be handled when we process the next line
-                i += 1
             else:
                 i += 1
         
@@ -728,15 +827,19 @@ class ResumeAnalyzerML:
             # Default to entry if unclear
             return ('entry', max(years, 0))
     
-    def _calculate_ml_ats_score(self, text: str, info: Dict, experience_level: str = "entry") -> float:
+    def _calculate_ml_ats_score(self, text: str, info: Dict, experience_level: str = "entry") -> Dict:
         """
         Calculate ATS score using ML semantic analysis
         Adjusts expectations based on experience level (entry/mid/senior)
         
         Uses Sentence-BERT to compare resume against ideal resume characteristics
+        Returns dict with total score and component breakdown
         """
         # Add text to info for experience detection
         info['text'] = text
+        
+        # Initialize score breakdown dictionary
+        score_breakdown = {}
         
         # Ideal resume characteristics (what ATS systems look for)
         ideal_characteristics = [
@@ -761,275 +864,327 @@ class ResumeAnalyzerML:
         top_similarities = torch.topk(similarities, k=min(3, len(similarities))).values
         avg_top_similarity = torch.mean(top_similarities).item()
         
-        # STRICT SCORING - Align with ResumeWorded's harsh standards
-        # Base ML score (0-10 points) - Reduced significantly
-        ml_score = avg_top_similarity * 10
+        # ADJUSTED SCORING - Industry-aligned (closer to ResumeWorded standards)
+        # Base ML score (0-20 points) - Increased to match industry tools
+        ml_score = avg_top_similarity * 20
+        score_breakdown['ml_semantic_score'] = round(ml_score, 1)
         
-        # Rule-based scoring (0-90 points) - Much stricter thresholds
+        # Rule-based scoring (0-80 points) - Industry-standard thresholds
         rule_score = 0
         
         # Contact info (3 points) - Basic requirement
+        contact_score = 0
         if info["has_contact"]:
-            rule_score += 3
+            contact_score += 3
         elif info["email"] or info["phone"]:
-            rule_score += 1.5
+            contact_score += 1.5
+        score_breakdown['contact_info_score'] = round(contact_score, 1)
+        rule_score += contact_score
         
         # Professional identity (2 points)
+        identity_score = 0
         if info.get("name"):
-            rule_score += 1
+            identity_score += 1
         if info.get("linkedin") or info.get("github"):
-            rule_score += 1
+            identity_score += 1
+        score_breakdown['professional_identity_score'] = round(identity_score, 1)
+        rule_score += identity_score
         
         # Sections (5 points) - STRICT: Need all key sections
+        sections_score = 0
         if len(info["sections"]) >= 6:
-            rule_score += 5
+            sections_score = 5
         elif len(info["sections"]) >= 5:
-            rule_score += 4
+            sections_score = 4
         elif len(info["sections"]) >= 4:
-            rule_score += 3
+            sections_score = 3
         elif len(info["sections"]) >= 3:
-            rule_score += 1.5
+            sections_score = 1.5
         # Less than 3 sections = 0 points
+        score_breakdown['sections_score'] = round(sections_score, 1)
+        rule_score += sections_score
         
         # Education (6 points) - STRICTER
+        education_score = 0
         education_count = len(info.get("education", []))
         if experience_level == "entry":
             if education_count >= 1:
                 edu = info.get("education", [{}])[0]
                 if edu.get("institution") and edu.get("degree") and edu.get("field"):
-                    rule_score += 6  # Complete info only
+                    education_score = 6  # Complete info only
                 elif edu.get("institution") and edu.get("degree"):
-                    rule_score += 4  # Partial
+                    education_score = 4  # Partial
                 else:
-                    rule_score += 2  # Minimal
+                    education_score = 2  # Minimal
         elif experience_level == "mid":
             if education_count >= 2:
-                rule_score += 6
+                education_score = 6
             elif education_count == 1:
                 edu = info.get("education", [{}])[0]
                 if edu.get("institution") and edu.get("degree"):
-                    rule_score += 5
+                    education_score = 5
                 else:
-                    rule_score += 2.5
+                    education_score = 2.5
         else:  # senior
             if education_count >= 2:
-                rule_score += 5
+                education_score = 5
             elif education_count >= 1:
-                rule_score += 4
+                education_score = 4
+        score_breakdown['education_score'] = round(education_score, 1)
+        rule_score += education_score
         
-        # Work Experience (15 points) - MOST IMPORTANT, VERY STRICT
+        # Work Experience (15 points) - MOST IMPORTANT, ADJUSTED
+        work_experience_score = 0
         work_exp_count = len(info.get("work_experience", []))
         project_count = len(info.get("projects", []))
         
         if experience_level == "entry":
-            # Entry: Very strict - need solid experience or projects
+            # Entry: Balance experience and projects (more forgiving)
             if work_exp_count >= 3:
-                rule_score += 15  # Outstanding for entry
+                work_experience_score = 15  # Outstanding for entry
             elif work_exp_count == 2:
-                rule_score += 12  # Excellent
+                work_experience_score = 13  # Excellent
             elif work_exp_count == 1:
-                rule_score += 7  # Acceptable
+                # If limited work exp, give more credit for projects
+                if project_count >= 5:
+                    work_experience_score = 13  # Strong project portfolio compensates
+                elif project_count >= 4:
+                    work_experience_score = 11
+                elif project_count >= 3:
+                    work_experience_score = 9
+                else:
+                    work_experience_score = 7  # Acceptable
+            elif project_count >= 5:
+                work_experience_score = 10  # Strong projects compensate significantly
             elif project_count >= 4:
-                rule_score += 8  # Strong projects barely compensate
+                work_experience_score = 8  
             elif project_count >= 3:
-                rule_score += 5  # Some compensation
+                work_experience_score = 6  
             else:
-                rule_score += 1  # Insufficient
+                work_experience_score = 2  # Minimal
         elif experience_level == "mid":
             # Mid: Need proven track record
             if work_exp_count >= 4:
-                rule_score += 15
+                work_experience_score = 15
             elif work_exp_count == 3:
-                rule_score += 13
+                work_experience_score = 13
             elif work_exp_count == 2:
-                rule_score += 8  # Below expectations
+                work_experience_score = 8  # Below expectations
             elif work_exp_count == 1:
-                rule_score += 3  # Major red flag
+                work_experience_score = 3  # Major red flag
             else:
-                rule_score += 0  # Unacceptable
+                work_experience_score = 0  # Unacceptable
         else:  # senior
             # Senior: Need extensive experience
             if work_exp_count >= 5:
-                rule_score += 15
+                work_experience_score = 15
             elif work_exp_count >= 4:
-                rule_score += 12
+                work_experience_score = 12
             elif work_exp_count == 3:
-                rule_score += 7  # Minimum acceptable
+                work_experience_score = 7  # Minimum acceptable
             elif work_exp_count == 2:
-                rule_score += 2  # Major concern
+                work_experience_score = 2  # Major concern
             else:
-                rule_score += 0  # Unacceptable
+                work_experience_score = 0  # Unacceptable
+        score_breakdown['work_experience_score'] = round(work_experience_score, 1)
+        rule_score += work_experience_score
         
         # Projects (8 points) - STRICTER requirements
+        projects_score = 0
         if experience_level == "entry":
             # Entry: Projects CRITICAL but need quality
             if project_count >= 5:
-                rule_score += 8
+                projects_score = 8
             elif project_count >= 4:
-                rule_score += 7
+                projects_score = 7
             elif project_count >= 3:
-                rule_score += 5
+                projects_score = 5
             elif project_count >= 2:
-                rule_score += 3
+                projects_score = 3
             elif project_count == 1:
-                rule_score += 1
+                projects_score = 1
         elif experience_level == "mid":
             # Mid: Projects nice but not critical
             if project_count >= 4:
-                rule_score += 8
+                projects_score = 8
             elif project_count >= 3:
-                rule_score += 6
+                projects_score = 6
             elif project_count >= 2:
-                rule_score += 4
+                projects_score = 4
             elif project_count >= 1:
-                rule_score += 2
+                projects_score = 2
         else:  # senior
             # Senior: Projects optional
             if project_count >= 3:
-                rule_score += 7
+                projects_score = 7
             elif project_count >= 2:
-                rule_score += 5
+                projects_score = 5
             elif project_count >= 1:
-                rule_score += 3
+                projects_score = 3
+        score_breakdown['projects_score'] = round(projects_score, 1)
+        rule_score += projects_score
         
-        # Action verbs (6 points) - MUCH STRICTER
+        # Action verbs (6 points) - ADJUSTED: More realistic expectations
+        action_verbs_score = 0
         verb_count = len(info["action_verbs"])
-        if verb_count >= 20:
-            rule_score += 6
-        elif verb_count >= 15:
-            rule_score += 5
+        if verb_count >= 15:
+            action_verbs_score = 6
         elif verb_count >= 12:
-            rule_score += 4
+            action_verbs_score = 5
+        elif verb_count >= 10:
+            action_verbs_score = 4
         elif verb_count >= 8:
-            rule_score += 2
-        elif verb_count >= 5:
-            rule_score += 1
-        # Less than 5 verbs = 0 points
+            action_verbs_score = 3
+        elif verb_count >= 6:
+            action_verbs_score = 2
+        elif verb_count >= 4:
+            action_verbs_score = 1
+        # Less than 4 verbs = 0 points
+        score_breakdown['action_verbs_score'] = round(action_verbs_score, 1)
+        rule_score += action_verbs_score
         
-        # Skills diversity (5 points) - STRICTER
+        # Skills diversity (5 points) - ADJUSTED: More reasonable expectations
+        skills_score = 0
         skill_count = len(info.get("skills", []))
-        if skill_count >= 30:
-            rule_score += 5
-        elif skill_count >= 25:
-            rule_score += 4
+        if skill_count >= 25:
+            skills_score = 5
         elif skill_count >= 20:
-            rule_score += 3
+            skills_score = 4
         elif skill_count >= 15:
-            rule_score += 2
+            skills_score = 3
         elif skill_count >= 10:
-            rule_score += 1
-        # Less than 10 skills = 0 points
+            skills_score = 2
+        elif skill_count >= 6:
+            skills_score = 1
+        # Less than 6 skills = 0 points
+        score_breakdown['skills_score'] = round(skills_score, 1)
+        rule_score += skills_score
         
         # Metrics/quantification (7 points) - CRITICAL for impact
+        # ADJUSTED: More lenient scoring aligned with industry standards
+        quantification_score = 0
         total_bullets = info.get("total_bullets", 0)
         quantified_bullets = info.get("quantified_bullets", 0)
         
         if total_bullets > 0:
             quantification_ratio = quantified_bullets / total_bullets
-            if quantification_ratio >= 0.7:  # STRICTER: 70%+
-                rule_score += 7
-            elif quantification_ratio >= 0.6:  # 60%+
-                rule_score += 6
-            elif quantification_ratio >= 0.5:  # 50%+
-                rule_score += 5
+            if quantification_ratio >= 0.5:  # 50%+
+                quantification_score = 7
             elif quantification_ratio >= 0.4:  # 40%+
-                rule_score += 3
+                quantification_score = 6
             elif quantification_ratio >= 0.3:  # 30%+
-                rule_score += 2
+                quantification_score = 5
             elif quantification_ratio >= 0.2:  # 20%+
-                rule_score += 1
-            # Less than 20% quantification = 0 points
+                quantification_score = 4
+            elif quantification_ratio >= 0.15:  # 15%+
+                quantification_score = 3
+            elif quantification_ratio >= 0.10:  # 10%+
+                quantification_score = 2
+            elif quantification_ratio >= 0.05:  # 5%+
+                quantification_score = 1
+            # Less than 5% quantification = 0 points
         else:
             # Fallback to number count
             num_count = len(info.get("numbers", []))
             if num_count >= 10:
-                rule_score += 4
+                quantification_score = 4
             elif num_count >= 7:
-                rule_score += 3
+                quantification_score = 3
             elif num_count >= 5:
-                rule_score += 2
+                quantification_score = 2
             elif num_count >= 3:
-                rule_score += 1
+                quantification_score = 1
+        score_breakdown['quantification_score'] = round(quantification_score, 1)
+        rule_score += quantification_score
         
         # Content density (4 points) - STRICTER range
+        content_density_score = 0
         word_count = info.get("word_count", len(text.split()))
         if 600 <= word_count <= 800:  # Optimal range (NARROWER)
-            rule_score += 4
+            content_density_score = 4
         elif 500 <= word_count <= 900:  # Acceptable
-            rule_score += 3
+            content_density_score = 3
         elif 400 <= word_count <= 1000:  # Marginal
-            rule_score += 2
+            content_density_score = 2
         elif 300 <= word_count <= 1200:  # Needs work
-            rule_score += 1
+            content_density_score = 1
         # Outside range = 0 points
+        score_breakdown['content_density_score'] = round(content_density_score, 1)
+        rule_score += content_density_score
         
         # Bullet points (24 points) - MAJOR differentiator, MUCH STRICTER
+        bullet_points_score = 0
         total_bullets = info.get("total_bullets", 0)
         
         if experience_level == "entry":
             # Entry: 10-15 bullets expected (internships + projects)
             if 12 <= total_bullets <= 15:
-                rule_score += 24  # Perfect for entry
+                bullet_points_score = 24  # Perfect for entry
             elif 10 <= total_bullets <= 17:
-                rule_score += 20  # Very good
+                bullet_points_score = 20  # Very good
             elif 8 <= total_bullets <= 19:
-                rule_score += 16  # Good
+                bullet_points_score = 16  # Good
             elif 6 <= total_bullets <= 21:
-                rule_score += 12  # Acceptable
+                bullet_points_score = 12  # Acceptable
             elif 5 <= total_bullets <= 23:
-                rule_score += 8  # Needs improvement
+                bullet_points_score = 8  # Needs improvement
             elif total_bullets >= 4:
-                rule_score += 4  # Weak
+                bullet_points_score = 4  # Weak
             # Less than 4 bullets = 0 points
         elif experience_level == "mid":
             # Mid: 18-25 bullets expected (multiple roles + projects)
             if 20 <= total_bullets <= 25:
-                rule_score += 24  # Perfect for mid
+                bullet_points_score = 24  # Perfect for mid
             elif 18 <= total_bullets <= 28:
-                rule_score += 20  # Very good
+                bullet_points_score = 20  # Very good
             elif 15 <= total_bullets <= 30:
-                rule_score += 16  # Good
+                bullet_points_score = 16  # Good
             elif 12 <= total_bullets <= 32:
-                rule_score += 12  # Acceptable
+                bullet_points_score = 12  # Acceptable
             elif 10 <= total_bullets <= 35:
-                rule_score += 8  # Needs improvement
+                bullet_points_score = 8  # Needs improvement
             elif total_bullets >= 8:
-                rule_score += 4  # Weak
+                bullet_points_score = 4  # Weak
             # Less than 8 bullets = 0 points (unacceptable for mid)
         else:  # senior
             # Senior: 25-35 bullets expected (extensive experience)
             if 28 <= total_bullets <= 35:
-                rule_score += 24  # Perfect for senior
+                bullet_points_score = 24  # Perfect for senior
             elif 25 <= total_bullets <= 38:
-                rule_score += 20  # Very good
+                bullet_points_score = 20  # Very good
             elif 20 <= total_bullets <= 40:
-                rule_score += 16  # Good
+                bullet_points_score = 16  # Good
             elif 18 <= total_bullets <= 42:
-                rule_score += 12  # Acceptable
+                bullet_points_score = 12  # Acceptable
             elif 15 <= total_bullets <= 45:
-                rule_score += 8  # Needs improvement
+                bullet_points_score = 8  # Needs improvement
             elif total_bullets >= 12:
-                rule_score += 4  # Weak
+                bullet_points_score = 4  # Weak
             # Less than 12 bullets = 0 points (unacceptable for senior)
+        score_breakdown['bullet_points_score'] = round(bullet_points_score, 1)
+        rule_score += bullet_points_score
         
         # STRICT SCORING BREAKDOWN (Aligned with ResumeWorded standards):
-        # ML Semantic: 10 points (reduced from 15)
+        # ML Semantic: 20 points
         # Contact: 3 points (essential requirement)
         # Professional Identity: 2 points (LinkedIn/GitHub)
         # Sections: 5 points (need 6+ sections for full score)
         # Education: 6 points (level-dependent)
         # Work Experience: 15 points (CRITICAL, level-dependent)
         # Projects: 8 points (level-dependent)
-        # Action Verbs: 6 points (need 20+ for full score)
-        # Skills: 5 points (need 30+ for full score)
-        # Metrics: 7 points (need 70%+ quantification for full score)
+        # Action Verbs: 6 points (need 15+ for full score)
+        # Skills: 5 points (need 25+ for full score)
+        # Metrics: 7 points (need 50%+ quantification for full score)
         # Content Density: 4 points (600-800 words optimal)
         # Bullet Points: 24 points (PRIMARY differentiator, level-dependent)
-        # TOTAL: 10 + 90 = 100 points
+        # TOTAL: 20 + 80 = 100 points
         # This is MUCH STRICTER than before - most resumes will score 40-60%
         
         total_score = ml_score + rule_score
-        return min(100, max(0, total_score))
+        score_breakdown['total_score'] = round(min(100, max(0, total_score)), 1)
+        score_breakdown['rule_based_score'] = round(rule_score, 1)
+        
+        return score_breakdown
     
     def _calculate_rule_based_score(self, text: str, info: Dict, experience_level: str = "entry") -> float:
         """Fallback rule-based scoring when ML is not available - level-aware"""
