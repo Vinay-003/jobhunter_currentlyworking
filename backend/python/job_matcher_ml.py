@@ -347,50 +347,241 @@ class JobMatcherML:
     
     def _detect_job_seniority(self, job_title: str, job_description: str) -> str:
         """
-        Detect job seniority level from title and description
+        Detect job seniority level from title and description with comprehensive keyword matching
         
         Returns: 'entry', 'mid', 'senior', 'principal', 'intern'
         """
-        combined = f"{job_title} {job_description}".lower()
+        title_lower = job_title.lower()
+        desc_lower = job_description.lower()
+        combined = f"{title_lower} {desc_lower}"
         
-        # Intern/student level (highest priority)
-        if any(term in combined for term in ['intern', 'internship', 'co-op', 'co op', 'trainee']):
-            return 'intern'
+        # Priority 1: Intern/student level (highest priority - most specific)
+        intern_keywords = [
+            'intern', 'internship', 'co-op', 'co op', 'trainee', 'apprentice',
+            'student', 'undergraduate', 'summer intern', 'winter intern', 
+            'part-time intern', 'research intern'
+        ]
+        # Exclude "graduate student" from intern (that's for PhDs)
+        if any(keyword in combined for keyword in intern_keywords):
+            # But not if it says "graduate" without "student" (that's entry level)
+            if 'graduate student' not in combined or 'intern' in combined:
+                return 'intern'
         
-        # Principal/Staff level
-        if any(term in combined for term in ['principal', 'staff', 'distinguished', 'fellow', 'chief', 'head of', 'vp', 'director']):
+        # Priority 2: Principal/Staff/Executive level (check before senior to avoid conflicts)
+        # These are VERY specific titles
+        principal_exact_titles = [
+            # C-level and executives (most specific)
+            'chief technology officer', 'chief technical officer', 'cto', 'ceo', 'cfo', 
+            'cio', 'cpo', 'cdo', 'chief', 'vp ', 'vice president', 'v.p.', 'evp', 'svp',
+            
+            # Director level (very specific)
+            'director of', 'engineering director', 'director', 'head of', 'group head',
+            'department head', 'managing director',
+            
+            # Principal/Staff level (specific)
+            'principal engineer', 'principal developer', 'principal software',
+            'staff engineer', 'staff developer', 'staff software', 'staff architect',
+            'distinguished engineer', 'fellow', 'principal architect',
+            
+            # High-level specialized architects
+            'solutions architect', 'enterprise architect', 'chief architect',
+            'principal consultant'
+        ]
+        if any(keyword in title_lower for keyword in principal_exact_titles):
             return 'principal'
         
-        # Senior level
-        if any(term in combined for term in ['senior', 'sr.', 'sr ', 'lead', 'architect', 'expert', 'specialist']):
-            # Check for years requirement
-            years_required = re.findall(r'(\d+)\+?\s*years', combined)
-            if years_required and int(years_required[0]) >= 7:
-                return 'principal'
-            return 'senior'
+        # Check for "manager" or "lead" in engineering/technical roles (these are senior/principal)
+        if any(term in title_lower for term in ['engineering manager', 'technical manager', 
+                                                  'eng manager', 'tech manager']):
+            return 'principal'
         
-        # Mid level
-        if any(term in combined for term in ['mid-level', 'mid level', 'associate', 'ii', '2']):
-            return 'mid'
+        # Priority 3: Entry level (check BEFORE senior to catch "junior" correctly)
+        entry_exact_keywords = [
+            # Direct entry terms (most specific)
+            'entry-level', 'entry level', 'junior ', 'jr. ', 'jr ', 'junior developer',
+            'junior engineer', 'junior software', 'jr developer', 'jr engineer',
+            
+            # Graduate positions (very specific to entry)
+            'graduate developer', 'graduate engineer', 'graduate programmer',
+            'graduate software', 'new grad', 'recent graduate', 'fresh graduate',
+            'recent grad',
+            
+            # Early career (VERY strong indicator)
+            'early career', 'early in your career', 'starting your career',
+            'beginning of your career',
+            
+            # Assistant positions
+            'assistant developer', 'assistant engineer', 'assistant programmer',
+            
+            # Level I positions (using word boundaries to avoid matching "ii", "iii", etc.)
+            'level 1', ' i ', 'l1 ', ' l1', 'software engineer 1', 'swe 1', 
+            'sde 1', 'engineer 1', 'developer 1'
+        ]
         
-        # Entry level indicators
-        if any(term in combined for term in ['entry', 'entry-level', 'junior', 'jr.', 'jr ', 'graduate', 'new grad', 'i ', ' i']):
-            return 'entry'
+        # Check for entry keywords, but be careful about Roman numerals
+        for keyword in entry_exact_keywords:
+            if keyword in combined:
+                # Special handling for single 'i' - must not be part of 'ii', 'iii', etc.
+                if keyword == ' i ':
+                    # Make sure it's not 'ii', 'iii', 'iv', 'v'
+                    if ' ii' not in combined and 'iii' not in combined and ' iv' not in combined:
+                        return 'entry'
+                else:
+                    return 'entry'
         
-        # Check years requirement to determine level
-        years_required = re.findall(r'(\d+)\+?\s*years', combined)
-        if years_required:
-            years = int(years_required[0])
-            if years >= 10:
-                return 'principal'
-            elif years >= 7:
-                return 'senior'
-            elif years >= 3:
-                return 'mid'
-            elif years <= 2:
+        # Also check title alone for strong entry indicators
+        if any(keyword in title_lower for keyword in ['junior', 'jr.', 'jr ', 'entry', 
+                                                        'graduate', 'assistant']):
+            # But not if it also has "senior" or "lead" (e.g., "Senior Junior" doesn't make sense)
+            if not any(term in title_lower for term in ['senior', 'sr.', 'sr ', 'lead', 'principal']):
                 return 'entry'
         
-        # Default: assume mid-level if unclear
+        # IMPORTANT: Check for strong entry language in description (before checking senior)
+        # These phrases strongly indicate entry-level even if other keywords exist
+        strong_entry_phrases = [
+            'learn on the job', 'willingness to learn', 'eager to learn',
+            'we will teach', "we'll teach", 'training provided',
+            'mentorship provided', 'with mentorship', 'mentored by',
+            'no experience required', 'no prior experience'
+        ]
+        if any(phrase in desc_lower for phrase in strong_entry_phrases):
+            # This is likely entry-level - the job is explicitly offering to teach
+            return 'entry'
+        
+        # Priority 4: Senior level (now safe to check after entry)
+        senior_keywords = [
+            # Direct senior titles (very specific)
+            'senior ', 'sr. ', 'sr ', 'senior developer', 'senior engineer', 
+            'senior software', 'sr developer', 'sr engineer', 'sr software',
+            
+            # Lead positions (specific to title usually)
+            'lead engineer', 'lead developer', 'lead software', 'lead programmer',
+            'tech lead', 'technical lead', 'team lead',
+            
+            # Architect roles (senior level)
+            'architect', 'software architect', 'solution architect', 'system architect',
+            'application architect', 'cloud architect', 'data architect',
+            
+            # Expert/Specialist
+            'expert', 'specialist', 'senior specialist',
+            
+            # Level indicators (specific numbers) - III, IV, V are senior (5-7 years typically)
+            'level 3', 'level 4', 'level 5', 'level iii', 'level iv', 'level v',
+            'l3 ', 'l4 ', 'l5 ', ' l3', ' l4', ' l5',
+            'software engineer 3', 'software engineer 4', 'software engineer 5',
+            'swe 3', 'swe 4', 'swe 5', 'sde 3', 'sde 4', 'sde 5',
+            'engineer 3', 'engineer 4', 'engineer 5',
+            'software engineer iii', 'software engineer iv', 'software engineer v',
+            'sde iii', 'sde iv', 'sde v', 
+            'engineer iii', 'engineer iv', 'engineer v',
+            'developer iii', 'developer iv', 'developer v',
+            
+            # Senior consultant
+            'senior consultant', 'lead consultant'
+        ]
+        if any(keyword in combined for keyword in senior_keywords):
+            # Double-check years - 7+ might push to principal
+            # Try range pattern first, then single number
+            years_range_match = re.search(r'(\d+)\s*(?:to|-)\s*(\d+)\s*years', combined)
+            if years_range_match:
+                min_years = int(years_range_match.group(1))
+                max_years = int(years_range_match.group(2))
+                avg_years = (min_years + max_years) // 2
+                if avg_years >= 7:
+                    return 'principal'
+            else:
+                years_match = re.search(r'(\d+)\+?\s*years', combined)
+                if years_match and int(years_match.group(1)) >= 7:
+                    return 'principal'
+            return 'senior'
+        
+        # Priority 5: Mid level
+        mid_keywords = [
+            # Direct mid-level terms
+            'mid-level', 'mid level', 'intermediate', 'mid-senior',
+            
+            # Associate/Analyst roles (must check title to avoid false positives)
+            'associate ', 'associate engineer', 'associate developer', 'associate software',
+            'analyst', 'software analyst', 'systems analyst',
+            
+            # Level 2 indicators (with better patterns)
+            'level 2', ' ii ', 'level ii', 'l2 ', ' l2', 'software engineer 2', 
+            'swe 2', 'sde 2', 'engineer 2', 'developer 2',
+            'engineer ii', 'developer ii', 'sde ii', 'software engineer ii',
+            
+            # Consultant (standard)
+            'consultant', 'technical consultant', 'software consultant',
+            
+            # Experienced but not senior
+            'experienced developer', 'experienced engineer'
+        ]
+        if any(keyword in combined for keyword in mid_keywords):
+            return 'mid'
+        
+        # Priority 6: Check years of experience requirement (most reliable)
+        # Look for patterns like "5+ years", "3-5 years", "5 to 7 years"
+        years_patterns = [
+            r'(\d+)\s*(?:\+|plus)\s*years',  # "5+ years" or "5 plus years"
+            r'(\d+)\s*(?:to|-)\s*(\d+)\s*years',  # "3-5 years" or "3 to 5 years"
+            r'(\d+)\s*years',  # "5 years"
+        ]
+        
+        for pattern in years_patterns:
+            match = re.search(pattern, combined)
+            if match:
+                if len(match.groups()) == 2 and match.group(2):
+                    # Range like "3-5 years" - take average
+                    min_years = int(match.group(1))
+                    max_years = int(match.group(2))
+                    years = (min_years + max_years) // 2
+                else:
+                    # Single number like "5+ years" or "5 years"
+                    years = int(match.group(1))
+                
+                # Classify based on years
+                if years >= 10:
+                    return 'principal'
+                elif years >= 7:
+                    return 'senior'
+                elif years >= 5:
+                    return 'senior'
+                elif years >= 3:
+                    return 'mid'
+                elif years >= 2:
+                    return 'mid'
+                elif years <= 1:
+                    return 'entry'
+                break
+        
+        # Priority 7: Check for responsibility indicators in job description
+        responsibility_indicators = {
+            'principal': ['define architecture', 'strategic', 'company-wide', 'cross-functional leadership'],
+            'senior': ['mentor', 'mentoring', 'code review', 'lead team', 'technical decisions', 
+                      'design systems', 'architecture decisions'],
+            'mid': ['collaborate', 'work with team', 'contribute to', 'participate in'],
+            'entry': ['learn', 'training provided', 'guidance', 'support from senior', 'shadowing']
+        }
+        
+        for level, indicators in responsibility_indicators.items():
+            if any(indicator in desc_lower for indicator in indicators):
+                return level
+        
+        # Priority 8: Default based on job title structure
+        # If title has no level indicators, look for role type
+        if any(role in title_lower for role in ['engineer', 'developer', 'programmer', 'software']):
+            # Plain "Software Engineer" or "Developer" with no qualifier
+            # Check if description has any hints
+            if any(term in desc_lower for term in ['looking for experienced', '5+ years', 
+                                                     'strong background', 'proven track record']):
+                return 'mid'
+            elif any(term in desc_lower for term in ['recent graduate', 'early career', 
+                                                       'no experience', 'will train']):
+                return 'entry'
+            else:
+                # Default to mid-level for unclear cases (safer assumption)
+                return 'mid'
+        
+        # Final default: mid-level (most common, safer than assuming entry or senior)
         return 'mid'
     
     def _calculate_seniority_penalty(
